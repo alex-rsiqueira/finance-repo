@@ -1,0 +1,8 @@
+# Function dependencies, for example:
+# package>=version
+
+pandas>=1.4.1
+pynubank>=2.17.0
+numpy>=1.22.3
+google.cloud>=0.34.0
+google-cloud-bigquery>=2.34.2
