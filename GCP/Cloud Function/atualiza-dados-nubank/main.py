@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import datetime
 import json
+import os
 
 storage_client = storage.Client()
 
@@ -14,6 +15,13 @@ def main(args):
     args = args.get_json(silent=True)
     username = args['username']
     password = args['password']
+
+    #bucket_name = os.environ.get('bucket_name', 'Variable bucket_name is not set.')
+
+    #bucket = storage_client.bucket(bucket_name)
+
+    #blob = bucket.blob('cert.p12')
+    #blob.download_to_filename('cert.p12')
 
     nu = Nubank()
     refresh_token = nu.authenticate_with_cert(username, password, 'cert.p12')
