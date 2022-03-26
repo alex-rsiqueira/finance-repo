@@ -16,15 +16,10 @@ def main(args):
     username = args['username']
     password = args['password']
 
-    #bucket_name = os.environ.get('bucket_name', 'Variable bucket_name is not set.')
-
-    #bucket = storage_client.bucket(bucket_name)
-
-    #blob = bucket.blob('cert.p12')
-    #blob.download_to_filename('cert.p12')
+    cert_name = 'cert-' + str(username[:-5]) + '.p12'
 
     nu = Nubank()
-    refresh_token = nu.authenticate_with_cert(username, password, 'cert.p12')
+    nu.authenticate_with_cert(username, password, cert_name)
     print('Nubank authentication - OK')
     
     client = nu.get_customer()
