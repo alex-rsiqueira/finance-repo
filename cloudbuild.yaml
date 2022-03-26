@@ -6,6 +6,7 @@ steps:
   - deploy
   - atualiza-dados-nubank
   - --region=us-central1
-  - --source=https://source.cloud.google.com/finances-314506/github_alex-rsiqueira_finance-repo/+/main:GCP/cloud-function/atualiza-dados-nubank/
+  - --source=https://source.developers.google.com/projects/finances-314506/repos/github_alex-rsiqueira_finance-repo/moveable-aliases/main/paths/GCP/Cloud Function/atualiza-dados-nubank/
+logsBucket: 'gs://gcf-sources-16973409618-us-central1'
 options:
-  logging: NONE
+  logging: GCS_ONLY
