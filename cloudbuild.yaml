@@ -4,7 +4,7 @@ steps:
   - gcloud
   - functions
   - deploy
-  - FUNCTION_NAME
+  - atualiza-dados-nubank
   - --region=us-central1
   - --source=https://https://source.cloud.google.com/finances-314506/github_alex-rsiqueira_finance-repo/+/main:GCP/cloud-function/atualiza-dados-nubank/
   - --trigger-http
