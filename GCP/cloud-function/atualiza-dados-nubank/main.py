@@ -16,7 +16,7 @@ def main(args):
     username = args['username']
     password = args['password']
 
-    cert_name = 'cert-' + str(username[:-5]) + '.p12'
+    cert_name = 'cert-' + str(username)[:-5] + '.p12'
 
     nu = Nubank()
     nu.authenticate_with_cert(username, password, cert_name)
