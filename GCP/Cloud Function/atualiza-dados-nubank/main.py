@@ -27,6 +27,32 @@ def main(args):
     refresh_token = nu.authenticate_with_cert(username, password, 'cert.p12')
     print('Nubank authentication - OK')
     
+    client = nu.get_customer()
+    del client['_links']
+    del client['devices']
+    del client['primary_device']
+    del client['external_ids']
+    del client['channels']
+    #del client['documents']
+
+    # Convert dict to json
+    client_json = json.dumps(client,ensure_ascii=False)
+
+    df_client = pd.read_json(StringIO(client_json))
+    dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+    df_client['dtinsert'] = dtinsert
+    df_client = df_client.drop('documents',1)
+    #display(df_client)
+
+    ## Insere registros do arquivo no BigQuery
+    bq_client = bigquery.Client(project='finances-314506')
+    dataset = bq_client.dataset(dataset_id='raw').table('tb_nubank_client')
+    table = bq_client.get_table(dataset)
+    insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_client)
+    print(f"Tabela populada com sucesso: tb_nubank_client")
+
+    client_id = df_client['id'][0]
+
     """
     ### Credit Card
     #### Retrieve credit card transactions
@@ -75,6 +101,7 @@ def main(args):
                 df_bills['bill_id'] = bill_id
                 df_bills['bill_competence'] = bill_competence
                 df_bills['state'] = bill_state
+                df_bills['id_client'] = client_id
                 dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
                 df_bills['dtinsert'] = dtinsert
                 
@@ -95,6 +122,7 @@ def main(args):
                 
                 dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
                 df_bill_statements['dtinsert'] = dtinsert
+                df_bill_statements['id_client'] = client_id
                 df_bill_statements = df_bill_statements.where(pd.notnull(df_bill_statements), None)
                 df_bill_statements = df_bill_statements.astype(object).replace(np.nan, 'None')
 
@@ -116,6 +144,7 @@ def main(args):
             df_bills['state'] = bill_state
             dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
             df_bills['dtinsert'] = dtinsert
+            df_bills['id_client'] = client_id
             
             ## Insere registros no BigQuery
             bq_client = bigquery.Client(project='finances-314506')
@@ -136,11 +165,17 @@ def main(args):
     df_account_statement = df_account_statement.rename(columns={'__typename': 'typename'})
 
     # replace NaN values
-    df_account_statement = df_account_statement.where(pd.notnull(df_account_statement), None)
+    #df_account_statement = df_account_statement.where(pd.notnull(df_account_statement), None)
+    df_account_statement = df_account_statement.astype(object).replace(np.nan, 'None')
+    print(df_account_statement)
 
     # retrieve the name from the dict value
     df_account_statement['originAccount'] = df_account_statement['originAccount'].apply(lambda x: x.get('name') if x != None else x)
     df_account_statement['destinationAccount'] = df_account_statement['destinationAccount'].apply(lambda x: x.get('name') if x != None else x)
+
+    dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+    df_account_statement['dtinsert'] = dtinsert
+    df_account_statement['id_client'] = client_id
 
     """#### Insert dataframe into BigQuery"""
     ## Insere registros do arquivo no BigQuery
