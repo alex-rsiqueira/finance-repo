@@ -165,8 +165,8 @@ def main(args):
     print(df_account_statement)
 
     # retrieve the name from the dict value
-    df_account_statement['originAccount'] = df_account_statement['originAccount'].apply(lambda x: x.get('name') if x != None else x)
-    df_account_statement['destinationAccount'] = df_account_statement['destinationAccount'].apply(lambda x: x.get('name') if x != None else x)
+    df_account_statement['originAccount'] = df_account_statement['originAccount'].apply(lambda x: x.get('name') if str(x) != 'None' else x)
+    df_account_statement['destinationAccount'] = df_account_statement['destinationAccount'].apply(lambda x: x.get('name') if str(x) != 'None' else x)
 
     dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
     df_account_statement['dtinsert'] = dtinsert
