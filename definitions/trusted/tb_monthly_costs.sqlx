@@ -1,0 +1,7 @@
+config {
+  type: "table"
+}
+
+SELECT
+  *
+FROM ${ref("tb_sheet_currency_conversion")}

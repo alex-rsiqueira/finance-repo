@@ -1,0 +1,6 @@
+{  "warehouse": "bigquery",
+  "defaultDatabase": "finances-314506",
+  "defaultLocation": "us-central1",
+  "defaultSchema": "raw",
+  "assertionsSchema": "dataform_assertions"
+}
