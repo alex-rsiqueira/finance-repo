@@ -1,5 +1,6 @@
 config {
   type: "view"
+  ,schema: "refined"
 }
 
 SELECT a.AnoMes
