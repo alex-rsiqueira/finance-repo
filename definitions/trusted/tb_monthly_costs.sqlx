@@ -2,6 +2,12 @@ config {
   type: "table"
 }
 
-SELECT
-  *
-FROM ${ref("tb_sheet_currency_conversion")}
+SELECT RIGHT(AnoMes,LENGTH(AnoMes)-1) AS AnoMes
+    ,IFNULL(Dia,16) AS Dia
+    ,Tipo
+    ,Classe
+    ,Nome
+    ,Moeda
+    ,Valor
+FROM ${ref("tb_sheet_monthly_costs")}
+UNPIVOT(Valor FOR AnoMes IN (_2023_07, _2023_08, _2023_09, _2023_10))
