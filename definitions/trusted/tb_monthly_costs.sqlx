@@ -1,5 +1,6 @@
 config {
   type: "table"
+  ,schema: "trusted"
 }
 
 SELECT RIGHT(AnoMes,LENGTH(AnoMes)-1) AS AnoMes

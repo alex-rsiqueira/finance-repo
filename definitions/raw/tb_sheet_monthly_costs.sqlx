@@ -3,4 +3,4 @@ config {
 }
 
 SELECT *
-FROM `finances-314506.raw.tb_sheet_monthly_costs`
+FROM `raw.tb_sheet_monthly_costs`

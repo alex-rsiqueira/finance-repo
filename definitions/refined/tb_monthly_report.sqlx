@@ -1,0 +1,12 @@
+config {
+  type: "table"
+}
+
+SELECT AnoMes
+    ,Dia
+    ,Tipo
+    ,Classe
+    ,Nome
+    ,Moeda
+    ,Valor
+FROM ${ref("tb_monthly_costs")}
