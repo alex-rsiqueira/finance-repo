@@ -1,5 +1,5 @@
 config {
-  type: "table"
+  type: "view"
   ,schema: "trusted"
 }
 

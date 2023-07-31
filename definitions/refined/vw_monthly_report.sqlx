@@ -9,4 +9,4 @@ SELECT AnoMes
     ,Nome
     ,Moeda
     ,Valor
-FROM ${ref("tb_monthly_costs")}
+FROM ${ref("vw_monthly_costs")}

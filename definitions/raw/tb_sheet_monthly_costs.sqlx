@@ -1,6 +1,6 @@
 config {
-  type: "view"
+  type: "declaration",
+  schema: "raw",
+  name: "tb_sheet_monthly_costs",
+  description: "raw monthly costs spreadsheet data"
 }
-
-SELECT *
-FROM `raw.tb_sheet_monthly_costs`

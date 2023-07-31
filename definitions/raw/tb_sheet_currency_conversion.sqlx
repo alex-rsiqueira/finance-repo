@@ -1,6 +1,6 @@
 config {
-  type: "view"
+  type: "declaration",
+  schema: "raw",
+  name: "tb_sheet_currency_conversion",
+  description: "raw currency conversion spreadsheet data"
 }
-
-SELECT *
-FROM `raw.tb_sheet_currency_conversion`
