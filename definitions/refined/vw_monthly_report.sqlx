@@ -1,12 +1,17 @@
 config {
-  type: "table"
+  type: "view"
 }
 
-SELECT AnoMes
-    ,Dia
-    ,Tipo
-    ,Classe
-    ,Nome
-    ,Moeda
-    ,Valor
-FROM ${ref("vw_monthly_costs")}
+SELECT a.AnoMes
+    ,a.Dia
+    ,a.Tipo
+    ,a.Classe
+    ,a.Nome
+    ,a.Moeda
+    ,a.Valor
+    ,a.Valor * b.BRL AS Valor_BRL
+    ,a.Valor * b.USD AS Valor_USD
+    ,a.Valor * b.EUR AS Valor_EUR
+FROM ${ref("vw_monthly_costs")} a
+LEFT JOIN ${ref("tb_sheet_currency_conversion")} b
+  ON a.Moeda = b.Moeda
