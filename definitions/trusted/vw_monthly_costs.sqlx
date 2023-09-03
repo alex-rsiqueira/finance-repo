@@ -3,7 +3,7 @@ config {
   ,schema: "trusted"
 }
 
-SELECT RIGHT(AnoMes,LENGTH(AnoMes)-1) AS AnoMes
+SELECT REPLACE(RIGHT(AnoMes,LENGTH(AnoMes)-1),'_','-') AS AnoMes
     ,IFNULL(Dia,16) AS Dia
     ,Tipo
     ,Classe
@@ -11,4 +11,4 @@ SELECT RIGHT(AnoMes,LENGTH(AnoMes)-1) AS AnoMes
     ,Moeda
     ,Valor
 FROM ${ref("tb_sheet_monthly_costs")}
-UNPIVOT(Valor FOR AnoMes IN (_2023_07, _2023_08, _2023_09, _2023_10))
+UNPIVOT(Valor FOR AnoMes IN (_2023_07, _2023_08, _2023_09, _2023_10, _2023_11, _2023_12))

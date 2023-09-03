@@ -3,16 +3,26 @@ config {
   ,schema: "refined"
 }
 
-SELECT a.AnoMes
-    ,a.Dia
+WITH CurrentBalanceCTE AS (
+  SELECT SUM(Balance_BRL) AS Balance_BRL
+      ,SUM(Balance_USD) AS Balance_USD
+      ,SUM(Balance_EUR) AS Balance_EUR
+  FROM ${ref("refined","vw_current_balance")}
+)
+SELECT CAST(CONCAT(a.AnoMes,'-',a.Dia) AS DATE) AS Data
     ,a.Tipo
     ,a.Classe
     ,a.Nome
     ,a.Moeda
-    ,a.Valor
-    ,a.Valor * b.BRL AS Valor_BRL
-    ,a.Valor * b.USD AS Valor_USD
-    ,a.Valor * b.EUR AS Valor_EUR
+    ,a.Valor * c.BRL AS Valor_BRL
+    ,a.Valor * c.USD AS Valor_USD
+    ,a.Valor * c.EUR AS Valor_EUR
+    ,CASE WHEN a.AnoMes = SUBSTR(CAST(CURRENT_DATE AS STRING),1,7) THEN 1 ELSE 0 END AS CurrentMonthFLG
+    ,CASE WHEN a.AnoMes = SUBSTR(CAST(CURRENT_DATE AS STRING),1,7) AND a.Dia >= EXTRACT(DAY FROM CURRENT_DATE) THEN 1 ELSE 0 END AS RemainingDaysFLG
+    ,b.Balance_BRL
+    ,b.Balance_USD
+    ,b.Balance_EUR
 FROM ${ref("vw_monthly_costs")} a
-LEFT JOIN ${ref("tb_sheet_currency_conversion")} b
-  ON a.Moeda = b.Moeda
+CROSS JOIN CurrentBalanceCTE b 
+LEFT JOIN ${ref("tb_sheet_currency_conversion")} c
+  ON a.Moeda = c.Moeda
