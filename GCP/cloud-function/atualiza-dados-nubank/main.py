@@ -148,36 +148,36 @@ def main(args):
             insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_bills)
             print(f"Tabela populada com sucesso: tb_nubank_bills")
 
-    """#### Retrieve account transactions"""
-    account_statement = nu.get_account_feed()
-    account_statement_json = json.dumps(account_statement)
+    #"""#### Retrieve account transactions"""
+    #account_statement = nu.get_account_feed()
+    #account_statement_json = json.dumps(account_statement)
 
-    """#### Create dataframe - df_account_statement"""
-    df_account_statement = pd.read_json(StringIO(account_statement_json))
-    
-    """#### Treat dataframe"""
-    # rename column
-    df_account_statement = df_account_statement.rename(columns={'__typename': 'typename'})
+    #"""#### Create dataframe - df_account_statement"""
+    #df_account_statement = pd.read_json(StringIO(account_statement_json))
+    #
+    #"""#### Treat dataframe"""
+    ## rename column
+    #df_account_statement = df_account_statement.rename(columns={'__typename': 'typename'})
 
-    # replace NaN values
-    #df_account_statement = df_account_statement.where(pd.notnull(df_account_statement), None)
-    df_account_statement = df_account_statement.astype(object).replace(np.nan, 'None')
-    print(df_account_statement)
+    ## replace NaN values
+    ##df_account_statement = df_account_statement.where(pd.notnull(df_account_statement), None)
+    #df_account_statement = df_account_statement.astype(object).replace(np.nan, 'None')
+    #print(df_account_statement)
 
-    # retrieve the name from the dict value
-    df_account_statement['originAccount'] = df_account_statement['originAccount'].apply(lambda x: x.get('name') if str(x) != 'None' else x)
-    df_account_statement['destinationAccount'] = df_account_statement['destinationAccount'].apply(lambda x: x.get('name') if str(x) != 'None' else x)
+    ## retrieve the name from the dict value
+    #df_account_statement['originAccount'] = df_account_statement['originAccount'].apply(lambda x: x.get('name') if str(x) != 'None' else x)
+    #df_account_statement['destinationAccount'] = df_account_statement['destinationAccount'].apply(lambda x: x.get('name') if str(x) != 'None' else x)
 
-    dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
-    df_account_statement['dtinsert'] = dtinsert
-    df_account_statement['id_client'] = client_id
+    #dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+    #df_account_statement['dtinsert'] = dtinsert
+    #df_account_statement['id_client'] = client_id
 
-    """#### Insert dataframe into BigQuery"""
-    ## Insere registros do arquivo no BigQuery
-    bq_client = bigquery.Client(project='finances-314506')
-    dataset = bq_client.dataset(dataset_id='raw').table('tb_nubank_account')
-    table = bq_client.get_table(dataset)
-    insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_account_statement)
-    print(f"Tabela populada com sucesso: tb_nubank_account")
+    #"""#### Insert dataframe into BigQuery"""
+    ### Insere registros do arquivo no BigQuery
+    #bq_client = bigquery.Client(project='finances-314506')
+    #dataset = bq_client.dataset(dataset_id='raw').table('tb_nubank_account')
+    #table = bq_client.get_table(dataset)
+    #insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_account_statement)
+    #print(f"Tabela populada com sucesso: tb_nubank_account")
 
     return 'Finished'
