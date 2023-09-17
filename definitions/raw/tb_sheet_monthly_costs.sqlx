@@ -1,6 +1,0 @@
-config {
-  type: "declaration",
-  schema: "raw",
-  name: "tb_sheet_monthly_costs",
-  description: "raw monthly costs spreadsheet data"
-}

@@ -1,6 +1,0 @@
-config {
-  type: "declaration",
-  schema: "raw",
-  name: "tb_sheet_current_balance",
-  description: "raw current balance spreadsheet data"
-}

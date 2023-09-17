@@ -1,6 +1,0 @@
-config {
-  type: "declaration",
-  schema: "raw",
-  name: "tb_sheet_currency_conversion",
-  description: "raw currency conversion spreadsheet data"
-}
