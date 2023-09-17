@@ -2,6 +2,7 @@ from pynubank.utils.certificate_generator import CertificateGenerator
 from pynubank import Nubank, MockHttpClient, NuException
 from google.cloud import storage
 from google.cloud import bigquery
+from support import read_secret
 from io import StringIO
 import pandas as pd
 import numpy as np
@@ -14,7 +15,8 @@ storage_client = storage.Client()
 def main(args):
     args = args.get_json(silent=True)
     username = args['username']
-    password = args['password']
+    #password = args['password']
+    password = read_secret(username)
 
     cert_name = 'cert-' + str(username)[-5:] + '.p12'
 
