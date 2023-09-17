@@ -38,7 +38,7 @@ def main(args, context):
     df_client = pd.read_json(StringIO(client_json))
     dtinsert = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
     df_client['dtinsert'] = dtinsert
-    df_client = df_client.drop('documents',1)
+    df_client = df_client.drop('documents',axis=1)
     #display(df_client)
 
     ## Insere registros do arquivo no BigQuery
