@@ -10,9 +10,6 @@ import datetime
 import json
 import os
 
-project_id = os.environ.get("PROJECT_ID")
-bucket_name = os.environ.get("BUCKET")
-
 storage_client = storage.Client()
 
 def main(args, context):
@@ -22,7 +19,7 @@ def main(args, context):
 
     # Get certificate file from Cloud Storage
     cert_name = 'cert-' + str(username)[-5:] + '.p12'
-    download_blob(bucket_name,cert_name)
+    download_blob(cert_name)
 
     nu = Nubank()
     nu.authenticate_with_cert(username, password, cert_name)
