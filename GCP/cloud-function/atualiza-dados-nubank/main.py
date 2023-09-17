@@ -10,6 +10,8 @@ import datetime
 import json
 import os
 
+project_id = os.environ.get("PROJECT_ID")
+bq_client = bigquery.Client(project=project_id)
 storage_client = storage.Client()
 
 def main(args, context):
@@ -42,7 +44,6 @@ def main(args, context):
     #display(df_client)
 
     ## Insere registros do arquivo no BigQuery
-    bq_client = bigquery.Client(project='finances-314506')
     dataset = bq_client.dataset(dataset_id='raw').table('tb_nubank_client')
     table = bq_client.get_table(dataset)
     insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_client)
@@ -68,7 +69,6 @@ def main(args, context):
     df_credit = df_credit.astype(object).replace(np.nan, 'None')
 
     """#### Insert dataframe into BigQuery"""
-    bq_client = bigquery.Client(project='finances-314506')
     dataset = bq_client.dataset(dataset_id='raw').table('tb_nubank_credit')
     table = bq_client.get_table(dataset)
     insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_credit)
@@ -77,6 +77,15 @@ def main(args, context):
     """#### Retrieve bills information """
     # Lista de dicionários contendo todas as faturas do seu cartão de crédito
     bills = nu.get_bills()
+
+    # Get last open bill on trusted layer
+    query_job = bq_client.query(f"""SELECT COALESCE(MIN(bill_competence),'2000-01') bill_competence
+                                    FROM `{project_id}.trusted.tb_nubank_bills`
+                                    WHERE state = 'open'
+                                    AND id_client = '{client_id}'
+                                """)
+    result = query_job.result()  # Waits for job to complete.
+    last_open_bill = [dict(row) for row in query_job][0]['bill_competence']
 
     for i in range(0,len(bills)):
         bill_state = bills[i]['state']
@@ -92,7 +101,7 @@ def main(args, context):
 
             bill_competence = bills[i]['summary']['open_date'][:-3]
 
-            if int(bill_competence.replace('-','')) > int(datetime.datetime.today().strftime('%Y%m'))-2:
+            if int(bill_competence.replace('-','')) >= int(last_open_bill.replace('-',''))-1:
                 df_bills = pd.DataFrame(bills[i]['summary'], index=[0])
                 df_bills = df_bills[['open_date','due_date','total_balance','minimum_payment']]
                 df_bills['bill_id'] = bill_id
@@ -103,12 +112,10 @@ def main(args, context):
                 df_bills['dtinsert'] = dtinsert
                 
                 ## Insere registros no BigQuery
-                bq_client = bigquery.Client(project='finances-314506')
                 dataset = bq_client.dataset(dataset_id='raw').table('tb_nubank_bills')
                 table = bq_client.get_table(dataset)
                 insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_bills)
                 print(f"Tabela populada com sucesso: tb_nubank_bills")
-
 
                 bill_details = nu.get_bill_details(bills[i]) 
 
@@ -124,7 +131,6 @@ def main(args, context):
                 df_bill_statements = df_bill_statements.astype(object).replace(np.nan, 'None')
 
                 ## Insere registros no BigQuery
-                bq_client = bigquery.Client(project='finances-314506')
                 dataset = bq_client.dataset(dataset_id='raw').table('tb_nubank_bill_statements')
                 table = bq_client.get_table(dataset)
                 insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_bill_statements)
@@ -144,7 +150,6 @@ def main(args, context):
             df_bills['id_client'] = client_id
             
             ## Insere registros no BigQuery
-            bq_client = bigquery.Client(project='finances-314506')
             dataset = bq_client.dataset(dataset_id='raw').table('tb_nubank_bills')
             table = bq_client.get_table(dataset)
             insert_row = bq_client.insert_rows_from_dataframe(table=table, dataframe=df_bills)
