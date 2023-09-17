@@ -22,7 +22,7 @@ def main(args, context):
     download_blob(cert_name)
 
     nu = Nubank()
-    nu.authenticate_with_cert(username, password, cert_name)
+    nu.authenticate_with_cert(username, password, '/tmp/'+cert_name)
     print('Nubank authentication - OK')
     
     client = nu.get_customer()
