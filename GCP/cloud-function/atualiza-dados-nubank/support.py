@@ -2,8 +2,6 @@ import os
 from google.cloud import secretmanager
 from google.cloud import storage
 
-project_id = os.environ.get("PROJECT_ID")
-
 def read_secret(secret_name):
     client = secretmanager.SecretManagerServiceClient()
     name = f"projects/{project_id}/secrets/{secret_name}/versions/latest"

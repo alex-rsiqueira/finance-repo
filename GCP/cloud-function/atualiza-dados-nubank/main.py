@@ -1,8 +1,8 @@
 from pynubank.utils.certificate_generator import CertificateGenerator
 from pynubank import Nubank, MockHttpClient, NuException
+from support import read_secret, download_blob
 from google.cloud import storage
 from google.cloud import bigquery
-from support import read_secret, download_blob
 from io import StringIO
 import pandas as pd
 import numpy as np
@@ -10,20 +10,19 @@ import datetime
 import json
 import os
 
+project_id = os.environ.get("PROJECT_ID")
+bucket_name = os.environ.get("BUCKET")
+
 storage_client = storage.Client()
 
 def main(args, context):
     # Get credentials
-    #args = args.get_json(silent=True)
-    print(args)
     username = args['username']
-    #password = args['password']
     password = read_secret(username)
-    print(password)
 
     # Get certificate file from Cloud Storage
     cert_name = 'cert-' + str(username)[-5:] + '.p12'
-    download_blob(cert_name)
+    download_blob(bucket_name,cert_name)
 
     nu = Nubank()
     nu.authenticate_with_cert(username, password, cert_name)
@@ -35,7 +34,6 @@ def main(args, context):
     del client['primary_device']
     del client['external_ids']
     del client['channels']
-    #del client['documents']
 
     # Convert dict to json
     client_json = json.dumps(client,ensure_ascii=False)
