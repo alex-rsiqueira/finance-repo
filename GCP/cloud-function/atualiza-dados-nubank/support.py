@@ -13,7 +13,7 @@ def read_secret(secret_name):
     return secret_value
 
 def download_blob(bucket_name, source_blob_name):
-    """Downloads a blob from the bucket."""
+    """Downloads a blob (file) from the bucket."""
 
     storage_client = storage.Client()
 

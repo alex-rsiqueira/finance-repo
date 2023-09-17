@@ -14,7 +14,7 @@ storage_client = storage.Client()
 
 def main(args, context):
     # Get credentials
-    args = args.get_json(silent=True)
+    #args = args.get_json(silent=True)
     username = args['username']
     #password = args['password']
     password = read_secret(username)
