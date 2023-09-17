@@ -1,0 +1,12 @@
+steps:
+- name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+  args:
+  - gcloud
+  - functions
+  - deploy
+  - atualiza-dados-nubank
+  - --region=us-central1
+  - --source=https://source.developers.google.com/projects/finances-314506/repos/github_alex-rsiqueira_finance-repo/moveable-aliases/main/paths/GCP/cloud-function/atualiza-dados-nubank/
+logsBucket: 'gs://gcf-sources-16973409618-us-central1'
+options:
+  logging: GCS_ONLY

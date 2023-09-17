@@ -1,0 +1,36 @@
+CREATE TABLE tb_nubank_client (
+id                             string             
+,cpf                            int64             
+,name                           string             
+,printed_name                   string             
+,preferred_name                 string               
+,email                          string            
+,phone                          int64             
+,dob                            string
+,gender                         string            
+,marital_status                 string             
+,nationality                    string       
+,profession                     string              
+,reported_income                int64              
+,billing_address_postcode       int64             
+,billing_address_line1          string             
+,billing_address_line2          string
+,billing_address_number         int64             
+,billing_address_city           string             
+,billing_address_state          string               
+,billing_address_locality       string             
+,billing_address_country        string             
+,address_postcode               int64             
+,address_line1                  string             
+,address_line2                  string       
+,address_number                 int64  
+,address_city                   string
+,address_state                  string             
+,address_locality               string            
+,address_country                string             
+,address_ref_point              string             
+,address_updated_at             datetime             
+,last_atualizacao_cadastral_at  datetime
+,invitations                    int64
+,dtinsert                       datetime             
+)
