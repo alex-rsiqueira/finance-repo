@@ -15,9 +15,11 @@ storage_client = storage.Client()
 def main(args, context):
     # Get credentials
     #args = args.get_json(silent=True)
+    print(args)
     username = args['username']
     #password = args['password']
     password = read_secret(username)
+    print(password)
 
     # Get certificate file from Cloud Storage
     cert_name = 'cert-' + str(username)[-5:] + '.p12'
