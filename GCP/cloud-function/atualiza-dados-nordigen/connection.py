@@ -11,8 +11,8 @@ def get_nordigen_accounts():
    
     bq_client = bigquery.Client(project=PROJECT_ID)
     query_job = bq_client.query(f"""SELECT b.id, person_ID, secret_ID
-                                    FROM `{PROJECT_ID}.trusted.tb_nordigen_accounts` a
-                                    INNER JOIN `{PROJECT_ID}.trusted.dim_user` b ON a.person_ID = b.cpf
+                                    FROM `{PROJECT_ID}.trusted.tb_sheet_nordigen_account` a
+                                    INNER JOIN `{PROJECT_ID}.refined.dim_user` b ON a.person_ID = b.cpf
                                     WHERE active_FLG = 1
                                 """)
     result = query_job.result()  # Waits for job to complete.
