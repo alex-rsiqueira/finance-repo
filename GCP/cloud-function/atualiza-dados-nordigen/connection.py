@@ -16,7 +16,7 @@ def get_nordigen_accounts():
                                     WHERE active_FLG = 1
                                 """)
     result = query_job.result()  # Waits for job to complete.
-    secret_list = [dict(row) for row in query_job][0]
+    secret_list = [dict(row) for row in query_job]
    
     return secret_list
 
