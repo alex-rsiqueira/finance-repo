@@ -12,7 +12,7 @@ df = pd.DataFrame()
 def log_error(project_id, dataset_id, table_id, error_code, message, desc_e):
 
     log_table = pd.DataFrame(columns=['ingestion_dt', 'type', 'error_code', 'message', 'description', 'line_no', 'file_name', 'gateway', 'end_point', 'url', 'page'])
-    ingestion_dt = datetime.datetime.now()
+    ingestion_dt = datetime.now()
     new_line = [{'ingestion_dt': ingestion_dt, 'type': 'Error', 'error_code': error_code, 'message': message, 'description': desc_e, 'end_point':table_id }]#, 'line_no': linha_erro}]
     log_table = pd.concat([log_table, pd.DataFrame(new_line, index=[0])], ignore_index=True)
     
