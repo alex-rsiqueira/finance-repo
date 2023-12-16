@@ -3,7 +3,7 @@ import connection
 
 TABLES_ID = ['tb_nordigen_transactions', 'tb_nordigen_meta', 'tb_nordigen_balances', 'tb_nordigen_details']
 
-def main(**kwargs):
+def main(context):
     
     nordigen_accounts = connection.get_nordigen_accounts()
 
