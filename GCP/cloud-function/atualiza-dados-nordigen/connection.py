@@ -36,7 +36,7 @@ def read_secret(secret_name):
 
     return secret_value
 
-def NordigenClient(secret_id,secret_key):
+def get_nordigen_client(secret_id,secret_key):
 
     # initialize Nordigen client and pass SECRET_ID and SECRET_KEY
     client = NordigenClient(

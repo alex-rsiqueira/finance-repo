@@ -11,9 +11,7 @@ def main(context):
         user_id = row['id']
         secret_id = row['secret_ID']
         secret_key = connection.read_secret('Nordigen_' + secret_id)
-        print(f'Secret ID : {secret_id}')
-        print(f'Secret Key : {secret_key}')
-        client, accounts = connection.NordigenClient(secret_id,secret_key)
+        client, accounts = connection.get_nordigen_client(secret_id,secret_key)
 
         for i in range(0,len(accounts)):
             account_id = accounts["accounts"][i]
