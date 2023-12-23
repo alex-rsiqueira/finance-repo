@@ -13,7 +13,7 @@ def main(context):
         secret_key = connection.read_secret('Nordigen_' + secret_id)
         client, accounts = connection.get_nordigen_client(secret_id,secret_key)
 
-        for i in range(0,len(accounts)-1):
+        for i in range(0,len(accounts["accounts"])-1):
             account_id = accounts["accounts"][i]
             account = client.account_api(id=account_id)
 
