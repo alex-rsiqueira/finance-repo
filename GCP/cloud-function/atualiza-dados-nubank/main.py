@@ -15,6 +15,8 @@ bq_client = bigquery.Client(project=project_id)
 storage_client = storage.Client()
 
 def main(args, context):
+    print(type(args),args)
+
     # Get credentials
     username = args['username']
     password = read_secret(username)

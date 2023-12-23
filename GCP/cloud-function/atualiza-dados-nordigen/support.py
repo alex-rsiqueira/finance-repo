@@ -67,67 +67,77 @@ def insert_db(df,table_id,dataset_id,project_id):
     # identify_error(table_id,e,dataset_id,project_id)
 
 def get_data(user_id,account,table_id):
-    
-    if table_id == 'tb_nordigen_meta':
-      
-      # Fetch account metadata
-      try:
-        meta_data = account.get_metadata()
-        meta_data = pd.json_normalize(meta_data)
-        df = meta_data
-        df['client_id'] = user_id
-        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
-        df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
-        insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
-      except Exception as e:
-        identify_error(table_id,e,DATASET_ID,PROJECT_ID)
+    # Check if the table was already loaded today
+    bq_client = bigquery.Client(project=PROJECT_ID)
+    query_job = bq_client.query(f"""SELECT MAX(dtinsert) as last_load_date
+                                    FROM `{PROJECT_ID}.raw.{table_id}`
+                                """)
+    result = query_job.result()  # Waits for job to complete.
+    last_load_date = [dict(row) for row in query_job][0]['last_load_date']
 
-    elif table_id =='tb_nordigen_details':
-      
-      # Fetch details
-      try:
-        details = account.get_details()
-        details = pd.json_normalize(details['account'])
-        df = details
-        df['client_id'] = user_id
-        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
-        df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
-        insert_db(df,table_id,DATASET_ID,PROJECT_ID)
+    if last_load_date < datetime.today().strftime('%Y-%m-%d'):
 
-      except Exception as e:
-        identify_error(table_id,e,DATASET_ID,PROJECT_ID)
+        if table_id == 'tb_nordigen_meta':
+          
+          # Fetch account metadata
+          try:
+            meta_data = account.get_metadata()
+            meta_data = pd.json_normalize(meta_data)
+            df = meta_data
+            df['client_id'] = user_id
+            df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+            df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
+            insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
-    elif table_id =='tb_nordigen_balances':
-      
-      # Fetch balances
-      try:
-        balances = account.get_balances()
-        balances = pd.json_normalize(balances['balances'])
-        df = balances
-        df['client_id'] = user_id
-        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
-        df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
-        insert_db(df,table_id,DATASET_ID,PROJECT_ID)
+          except Exception as e:
+            identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
-      except Exception as e:
-        identify_error(table_id,e,DATASET_ID,PROJECT_ID)
+        elif table_id =='tb_nordigen_details':
+          
+          # Fetch details
+          try:
+            details = account.get_details()
+            details = pd.json_normalize(details['account'])
+            df = details
+            df['client_id'] = user_id
+            df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+            df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
+            insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
-    elif table_id =='tb_nordigen_transactions':
-      
-      # Fetch transactions
-      try:
-        transactions = account.get_transactions()
-        transactions = pd.json_normalize(transactions['transactions']['booked'])
+          except Exception as e:
+            identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
-        df = transactions
-        df['client_id'] = user_id
-        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
-        df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
-        insert_db(df,table_id,DATASET_ID,PROJECT_ID)
+        elif table_id =='tb_nordigen_balances':
+          
+          # Fetch balances
+          try:
+            balances = account.get_balances()
+            balances = pd.json_normalize(balances['balances'])
+            df = balances
+            df['client_id'] = user_id
+            df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+            df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
+            insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
-        # Filter transactions by specific date range
-        # transactions = account.get_transactions(date_from="2022-10-01", date_to="2022-01-21")
+          except Exception as e:
+            identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
-      except Exception as e:
-        identify_error(table_id,e,DATASET_ID,PROJECT_ID)
+        elif table_id =='tb_nordigen_transactions':
+          
+          # Fetch transactions
+          try:
+            transactions = account.get_transactions()
+            transactions = pd.json_normalize(transactions['transactions']['booked'])
+
+            df = transactions
+            df['client_id'] = user_id
+            df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+            df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
+            insert_db(df,table_id,DATASET_ID,PROJECT_ID)
+
+            # Filter transactions by specific date range
+            # transactions = account.get_transactions(date_from="2022-10-01", date_to="2022-01-21")
+
+          except Exception as e:
+            identify_error(table_id,e,DATASET_ID,PROJECT_ID)
