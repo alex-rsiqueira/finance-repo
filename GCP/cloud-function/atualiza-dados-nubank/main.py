@@ -15,12 +15,12 @@ project_id = os.environ.get("PROJECT_ID")
 bq_client = bigquery.Client(project=project_id)
 storage_client = storage.Client()
 
-def main(event_data, context):
-    print(type(event_data),event_data)
-    print(type(base64.b64decode(event_data["data"]).decode()),base64.b64decode(event_data["data"]).decode())
+def main(event, context):
+    print(type(event),event)
+    print(type(base64.b64decode(event["data"]).decode('utf-8')),base64.b64decode(event["data"]).decode('utf-8'))
 
     # Get credentials
-    username = dict(base64.b64decode(event_data["data"]).decode())['username']
+    username = dict(base64.b64decode(event["data"]).decode('utf-8'))['username']
     password = read_secret(username)
 
     # Get certificate file from Cloud Storage
