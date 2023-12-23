@@ -20,7 +20,7 @@ def main(event_data, context):
     print(type(base64.b64decode(event_data["data"]).decode()),base64.b64decode(event_data["data"]).decode())
 
     # Get credentials
-    username = base64.b64decode(event_data["data"]).decode()['username']
+    username = dict(base64.b64decode(event_data["data"]).decode())['username']
     password = read_secret(username)
 
     # Get certificate file from Cloud Storage
