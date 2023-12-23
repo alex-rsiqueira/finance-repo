@@ -17,7 +17,7 @@ storage_client = storage.Client()
 
 def main(event_data, context):
     print(type(event_data),event_data)
-    print(base64.b64decode(event_data["data"]).decode())
+    print(type(base64.b64decode(event_data["data"]).decode()),base64.b64decode(event_data["data"]).decode())
 
     # Get credentials
     username = base64.b64decode(event_data["data"]).decode()['username']
