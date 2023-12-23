@@ -3,6 +3,7 @@ import json
 import requests
 import pandas as pd
 from datetime import datetime
+from google.cloud import bigquery
 
 PROJECT_ID = os.environ.get("PROJECT_ID")
 DATASET_ID = 'raw'
@@ -10,6 +11,8 @@ DATASET_ID = 'raw'
 df = pd.DataFrame()
 
 def log_error(project_id, dataset_id, table_id, error_code, message, desc_e):
+
+    print(f"[ERROR] {desc_e} - {message}")
 
     log_table = pd.DataFrame(columns=['ingestion_dt', 'type', 'error_code', 'message', 'description', 'line_no', 'file_name', 'gateway', 'end_point', 'url', 'page'])
     ingestion_dt = datetime.now()
@@ -24,29 +27,26 @@ def log_error(project_id, dataset_id, table_id, error_code, message, desc_e):
 ##ADICIONAR TESTE DE ERRO DE BANCO
 
 def identify_error(table_id,e,dataset_id,project_id):
+    
+    print('Registrando erro: ',e)
+    
     if isinstance(e, json.JSONDecodeError):
         desc_e= 'Erro de decodificação JSON'
-        print("Erro de decodificação JSON:", e)
         log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
     elif isinstance(e, requests.HTTPError):
         desc_e= 'Erro de requisição HTTP'
-        print("Erro de requisição HTTP:", e)
-        # status_code = response.status_code
         log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
     # elif isinstance(e, pyodbc.Error):
     #     desc_e= 'Erro de banco'
-    #     print("Erro de banco:", e)
     #     # status_code = response.status_code
     #     log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
     # elif isinstance(e, requests.RequestException):
         # pag=-1
         # desc_e= 'Erro de excessão da classe request'
-        # print("Erro de excessão da classe request:", e)
         # # status_code = e.response.status_code if e.response is not None else 'Desconhecido'
         # log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
     else:
         desc_e= 'Erro desconhecido'
-        print("Erro desconhecido:", e)
         log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
 
 def insert_db(df,table_id,dataset_id,project_id):
@@ -63,7 +63,6 @@ def insert_db(df,table_id,dataset_id,project_id):
         print(f"Tabela populada com sucesso: {table_id}")
     except Exception as e:
         identify_error(table_id,e,dataset_id,project_id)
-        print('Registrando erro: ',e)
 
     # identify_error(table_id,e,dataset_id,project_id)
 
@@ -77,11 +76,11 @@ def get_data(user_id,account,table_id):
         meta_data = pd.json_normalize(meta_data)
         df = meta_data
         df['client_id'] = user_id
+        df['dtinsert'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
       except Exception as e:
-        print('Registrando erro: ',e)
         identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
     elif table_id =='tb_nordigen_details':
@@ -92,11 +91,11 @@ def get_data(user_id,account,table_id):
         details = pd.json_normalize(details['account'])
         df = details
         df['client_id'] = user_id
+        df['dtinsert'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
       except Exception as e:
-        print('Registrando erro: ',e)
         identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
     elif table_id =='tb_nordigen_balances':
@@ -107,12 +106,11 @@ def get_data(user_id,account,table_id):
         balances = pd.json_normalize(balances['balances'])
         df = balances
         df['client_id'] = user_id
+        df['dtinsert'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
-
       except Exception as e:
-        print('Registrando erro: ',e)
         identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
     elif table_id =='tb_nordigen_transactions':
@@ -124,6 +122,7 @@ def get_data(user_id,account,table_id):
 
         df = transactions
         df['client_id'] = user_id
+        df['dtinsert'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
@@ -131,5 +130,4 @@ def get_data(user_id,account,table_id):
         # transactions = account.get_transactions(date_from="2022-10-01", date_to="2022-01-21")
 
       except Exception as e:
-        print('Registrando erro: ',e)
         identify_error(table_id,e,DATASET_ID,PROJECT_ID)
