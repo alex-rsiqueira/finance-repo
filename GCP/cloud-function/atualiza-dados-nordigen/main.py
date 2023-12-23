@@ -20,7 +20,8 @@ def main(context):
             print('Get Nordigen client')
             client, accounts = connection.get_nordigen_client(secret_id,secret_key)
 
-            for i in range(0,len(accounts["accounts"])-1):
+            for i in range(0,len(accounts["accounts"])):
+                print('')
                 account_id = accounts["accounts"][i]
                 account = client.account_api(id=account_id)
 
