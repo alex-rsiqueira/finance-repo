@@ -18,6 +18,6 @@ def main(context):
             account = client.account_api(id=account_id)
 
             for table_id in TABLES_ID:
-                print('<<>> Iniciando: ', table_id, ' <<>>')
+                print('<<>> Iniciando:', table_id, '<<>>')
                 support.get_data(user_id, account, table_id)
-                print('<<>> ',  table_id, ' Finalizada <<>>')
+                print('<<>>',  table_id, 'Finalizada <<>>')

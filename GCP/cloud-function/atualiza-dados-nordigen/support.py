@@ -67,7 +67,7 @@ def insert_db(df,table_id,dataset_id,project_id):
     # identify_error(table_id,e,dataset_id,project_id)
 
 def get_data(user_id,account,table_id):
-
+    
     if table_id == 'tb_nordigen_meta':
       
       # Fetch account metadata
@@ -76,7 +76,7 @@ def get_data(user_id,account,table_id):
         meta_data = pd.json_normalize(meta_data)
         df = meta_data
         df['client_id'] = user_id
-        df['dtinsert'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
@@ -91,7 +91,7 @@ def get_data(user_id,account,table_id):
         details = pd.json_normalize(details['account'])
         df = details
         df['client_id'] = user_id
-        df['dtinsert'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
@@ -106,7 +106,7 @@ def get_data(user_id,account,table_id):
         balances = pd.json_normalize(balances['balances'])
         df = balances
         df['client_id'] = user_id
-        df['dtinsert'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
@@ -122,7 +122,7 @@ def get_data(user_id,account,table_id):
 
         df = transactions
         df['client_id'] = user_id
-        df['dtinsert'] = datetime.datetime.today().strftime('%Y-%m-%d %H:%M:%S')
+        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
