@@ -7,6 +7,7 @@ from io import StringIO
 import pandas as pd
 import numpy as np
 import datetime
+import base64
 import json
 import os
 
@@ -16,9 +17,10 @@ storage_client = storage.Client()
 
 def main(event_data, context):
     print(type(event_data),event_data)
+    print(base64.b64decode(event_data["data"]).decode())
 
     # Get credentials
-    username = event_data['username']
+    username = base64.b64decode(event_data["data"]).decode()['username']
     password = read_secret(username)
 
     # Get certificate file from Cloud Storage
