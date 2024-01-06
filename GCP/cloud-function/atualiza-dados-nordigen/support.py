@@ -10,13 +10,15 @@ DATASET_ID = 'raw'
 
 df = pd.DataFrame()
 
-def log_error(project_id, dataset_id, table_id, error_code, message, desc_e):
+def log_error(error, desc_e = None, project_id = PROJECT_ID, dataset_id = DATASET_ID, table_id = None):
 
+    error_code = error.args[0]
+    message = str(error)
     print(f"[ERROR] {desc_e} - {message}")
 
     log_table = pd.DataFrame(columns=['ingestion_dt', 'type', 'error_code', 'message', 'description', 'line_no', 'file_name', 'gateway', 'end_point', 'url', 'page'])
     ingestion_dt = datetime.now()
-    new_line = [{'ingestion_dt': ingestion_dt, 'type': 'Error', 'error_code': error_code, 'message': message, 'description': desc_e, 'end_point':table_id }]#, 'line_no': linha_erro}]
+    new_line = [{'ingestion_dt': ingestion_dt, 'type': 'Error', 'error_code': error_code, 'message': message, 'description': desc_e, 'end_point':table_id }]
     log_table = pd.concat([log_table, pd.DataFrame(new_line, index=[0])], ignore_index=True)
     
      # Configurar o nome completo da tabela
@@ -32,10 +34,10 @@ def identify_error(table_id,e,dataset_id,project_id):
     
     if isinstance(e, json.JSONDecodeError):
         desc_e= 'Erro de decodificação JSON'
-        log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
+        log_error(e,desc_e,project_id,dataset_id,table_id)
     elif isinstance(e, requests.HTTPError):
         desc_e= 'Erro de requisição HTTP'
-        log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
+        log_error(e,desc_e,project_id,dataset_id,table_id)
     # elif isinstance(e, pyodbc.Error):
     #     desc_e= 'Erro de banco'
     #     # status_code = response.status_code
@@ -47,7 +49,7 @@ def identify_error(table_id,e,dataset_id,project_id):
         # log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
     else:
         desc_e= 'Erro desconhecido'
-        log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
+        log_error(e,desc_e,project_id,dataset_id,table_id)
 
 def insert_db(df,table_id,dataset_id,project_id):
      # Configurar o cliente do BigQuery

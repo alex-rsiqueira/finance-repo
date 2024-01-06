@@ -3,7 +3,7 @@ import connection
 
 TABLES_ID = ['tb_nordigen_transactions', 'tb_nordigen_meta', 'tb_nordigen_balances', 'tb_nordigen_details']
 
-def main(context):
+def main(event, context):
     
     try:
         print('Get Nordigen connection')
@@ -30,4 +30,6 @@ def main(context):
                     support.get_data(user_id, account, table_id)
                     print('<<>>',  table_id, 'Finalizada <<>>')
     except Exception as e:
-        print(f'Error : {e}')
+        support.log_error(e)
+
+    return "Nordigen Ingestion - Complete"
