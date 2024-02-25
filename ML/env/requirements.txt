@@ -1,0 +1,7 @@
+
+conda-forge::google-cloud-bigquery>=2.34.2
+pandas>=1.3.5
+pandas-gbq>=0.20.0
+fuzzywuzzy>=0.18.0
+scikit-learn>=1.4.1
+bigframes>=0.21.0
