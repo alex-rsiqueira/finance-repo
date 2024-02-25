@@ -7,6 +7,7 @@ from io import StringIO
 import pandas as pd
 import numpy as np
 import datetime
+import base64
 import json
 import os
 
@@ -14,9 +15,10 @@ project_id = os.environ.get("PROJECT_ID")
 bq_client = bigquery.Client(project=project_id)
 storage_client = storage.Client()
 
-def main(args, context):
+def main(event, context):
+    
     # Get credentials
-    username = args['username']
+    username = json.loads(base64.b64decode(event["data"]).decode('utf-8'))['username']
     password = read_secret(username)
 
     # Get certificate file from Cloud Storage

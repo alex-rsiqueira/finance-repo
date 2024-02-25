@@ -3,17 +3,22 @@ import json
 import requests
 import pandas as pd
 from datetime import datetime
+from google.cloud import bigquery
 
 PROJECT_ID = os.environ.get("PROJECT_ID")
 DATASET_ID = 'raw'
 
 df = pd.DataFrame()
 
-def log_error(project_id, dataset_id, table_id, error_code, message, desc_e):
+def log_error(error, desc_e = None, project_id = PROJECT_ID, dataset_id = DATASET_ID, table_id = None):
+
+    error_code = error.args[0]
+    message = str(error)
+    print(f"[ERROR] {desc_e} - {message}")
 
     log_table = pd.DataFrame(columns=['ingestion_dt', 'type', 'error_code', 'message', 'description', 'line_no', 'file_name', 'gateway', 'end_point', 'url', 'page'])
-    ingestion_dt = datetime.datetime.now()
-    new_line = [{'ingestion_dt': ingestion_dt, 'type': 'Error', 'error_code': error_code, 'message': message, 'description': desc_e, 'end_point':table_id }]#, 'line_no': linha_erro}]
+    ingestion_dt = datetime.now()
+    new_line = [{'ingestion_dt': ingestion_dt, 'type': 'Error', 'error_code': error_code, 'message': message, 'description': desc_e, 'end_point':table_id }]
     log_table = pd.concat([log_table, pd.DataFrame(new_line, index=[0])], ignore_index=True)
     
      # Configurar o nome completo da tabela
@@ -24,30 +29,27 @@ def log_error(project_id, dataset_id, table_id, error_code, message, desc_e):
 ##ADICIONAR TESTE DE ERRO DE BANCO
 
 def identify_error(table_id,e,dataset_id,project_id):
+    
+    print('Registrando erro: ',e)
+    
     if isinstance(e, json.JSONDecodeError):
         desc_e= 'Erro de decodificação JSON'
-        print("Erro de decodificação JSON:", e)
-        log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
+        log_error(e,desc_e,project_id,dataset_id,table_id)
     elif isinstance(e, requests.HTTPError):
         desc_e= 'Erro de requisição HTTP'
-        print("Erro de requisição HTTP:", e)
-        # status_code = response.status_code
-        log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
+        log_error(e,desc_e,project_id,dataset_id,table_id)
     # elif isinstance(e, pyodbc.Error):
     #     desc_e= 'Erro de banco'
-    #     print("Erro de banco:", e)
     #     # status_code = response.status_code
     #     log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
     # elif isinstance(e, requests.RequestException):
         # pag=-1
         # desc_e= 'Erro de excessão da classe request'
-        # print("Erro de excessão da classe request:", e)
         # # status_code = e.response.status_code if e.response is not None else 'Desconhecido'
         # log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
     else:
         desc_e= 'Erro desconhecido'
-        print("Erro desconhecido:", e)
-        log_error(project_id,dataset_id,table_id,e.args[0],str(e),desc_e)
+        log_error(e,desc_e,project_id,dataset_id,table_id)
 
 def insert_db(df,table_id,dataset_id,project_id):
      # Configurar o cliente do BigQuery
@@ -63,11 +65,20 @@ def insert_db(df,table_id,dataset_id,project_id):
         print(f"Tabela populada com sucesso: {table_id}")
     except Exception as e:
         identify_error(table_id,e,dataset_id,project_id)
-        print('Registrando erro: ',e)
 
     # identify_error(table_id,e,dataset_id,project_id)
 
 def get_data(user_id,account,table_id):
+
+    # Check if the table was already loaded today
+    # bq_client = bigquery.Client(project=PROJECT_ID)
+    # query_job = bq_client.query(f"""SELECT MAX(dtinsert) as last_load_date
+    #                                 FROM `{PROJECT_ID}.raw.{table_id}`
+    #                             """)
+    # result = query_job.result()  # Waits for job to complete.
+    # last_load_date = [dict(row) for row in query_job][0]['last_load_date']
+
+    # if last_load_date < datetime.today().strftime('%Y-%m-%d'):
 
     if table_id == 'tb_nordigen_meta':
       
@@ -77,11 +88,11 @@ def get_data(user_id,account,table_id):
         meta_data = pd.json_normalize(meta_data)
         df = meta_data
         df['client_id'] = user_id
+        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
       except Exception as e:
-        print('Registrando erro: ',e)
         identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
     elif table_id =='tb_nordigen_details':
@@ -92,11 +103,11 @@ def get_data(user_id,account,table_id):
         details = pd.json_normalize(details['account'])
         df = details
         df['client_id'] = user_id
+        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
       except Exception as e:
-        print('Registrando erro: ',e)
         identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
     elif table_id =='tb_nordigen_balances':
@@ -107,12 +118,11 @@ def get_data(user_id,account,table_id):
         balances = pd.json_normalize(balances['balances'])
         df = balances
         df['client_id'] = user_id
+        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
-
       except Exception as e:
-        print('Registrando erro: ',e)
         identify_error(table_id,e,DATASET_ID,PROJECT_ID)
 
     elif table_id =='tb_nordigen_transactions':
@@ -124,6 +134,7 @@ def get_data(user_id,account,table_id):
 
         df = transactions
         df['client_id'] = user_id
+        df['dtinsert'] = datetime.today().strftime('%Y-%m-%d %H:%M:%S')
         df.rename(columns=lambda x: x.replace('.', '_'), inplace=True)
         insert_db(df,table_id,DATASET_ID,PROJECT_ID)
 
@@ -131,5 +142,4 @@ def get_data(user_id,account,table_id):
         # transactions = account.get_transactions(date_from="2022-10-01", date_to="2022-01-21")
 
       except Exception as e:
-        print('Registrando erro: ',e)
         identify_error(table_id,e,DATASET_ID,PROJECT_ID)
