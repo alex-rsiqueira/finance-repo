@@ -1,0 +1,18 @@
+config {
+  type: "table"
+  ,schema: "trusted"
+  ,bigquery: {partitionBy: "data"}
+}
+
+SELECT CAST(data AS DATE) AS data
+    , competencia
+    , tipo
+    , trim(estabelecimento) AS estabelecimento
+    , trim(categoria) AS categoria
+    , descricao
+    , CAST(REPLACE(REPLACE(TRIM(REPLACE(REPLACE(valor,'.',''),'R$','')),'-  ','-'),',','.') AS DECIMAL) AS valor
+    , nome_estabelecimento
+    , evento
+    , flg_rateio
+    , qtd_pessoas
+FROM ${ref("raw", "tb_sheet_credit_card")}

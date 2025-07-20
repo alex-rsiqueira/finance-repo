@@ -1,0 +1,15 @@
+config {
+  type: "table"
+  ,schema: "refined"
+}
+
+SELECT 
+  id_client AS clientId
+  , bill_id AS billId
+  , CAST(CONCAT(bill_competence,'-01') AS DATE) AS billCompetenceDate
+  , open_date AS openDate
+  , due_date AS dueDate
+  , total_balance AS totalBalance
+  , minimum_payment AS minimumPayment
+  , FORMAT_DATE('%F %T',CURRENT_DATETIME()) AS dtinsert
+FROM ${ref("trusted", "tb_nubank_bills")}

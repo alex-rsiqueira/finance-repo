@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "raw",
+  name: "tb_sheet_monthly_costs_sim",
+  description: "raw monthly costs spreadsheet simmulation data"
+}

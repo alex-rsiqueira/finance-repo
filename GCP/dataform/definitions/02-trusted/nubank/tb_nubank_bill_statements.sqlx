@@ -1,0 +1,23 @@
+config {
+  type: "table"
+  ,schema: "trusted"
+  ,bigquery: {partitionBy: "post_date"}
+  ,tags: ["nubank"]
+}
+
+SELECT id_client
+    , bill_id
+    , bill_competence
+    , id
+    , CAST(post_date AS DATE) as post_date
+    , case when CAST(amount AS INT64) > 0 then 'Débito' else 'Crédito' end type
+    , category
+    , title as description
+    , CAST(amount AS DECIMAL)/100 AS amount
+    , charges
+    , index as charge_index
+    , format_date('%F %T',current_datetime()) as dtinsert
+FROM (SELECT *
+        , ROW_NUMBER() OVER(PARTITION BY id_client, id ORDER BY dtinsert DESC) as row_id
+      FROM ${ref("raw", "tb_nubank_bill_statements")}) a
+WHERE row_id = 1

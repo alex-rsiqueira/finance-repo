@@ -1,0 +1,10 @@
+config {
+  type: "table"
+  ,schema: "trusted"
+}
+
+select person_ID
+    ,secret_ID
+    ,active_FLG
+    ,format_date('%F %T',current_datetime()) as dtInsert
+from ${ref("raw", "tb_sheet_nordigen_account")}

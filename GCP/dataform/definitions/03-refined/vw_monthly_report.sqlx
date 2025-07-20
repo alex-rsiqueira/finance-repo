@@ -1,0 +1,38 @@
+config {
+  type: "view"
+  ,schema: "refined"
+}
+
+WITH CurrentBalanceCTE AS (
+  SELECT SUM(CASE WHEN Type = 'Checking' THEN Balance_BRL END) AS Checking_Balance_BRL
+      ,SUM(CASE WHEN Type = 'Checking' THEN Balance_USD END) AS Checking_Balance_USD
+      ,SUM(CASE WHEN Type = 'Checking' THEN Balance_EUR END) AS Checking_Balance_EUR
+      ,SUM(CASE WHEN Type = 'Investment' THEN Balance_BRL END) AS Investment_Balance_BRL
+      ,SUM(CASE WHEN Type = 'Investment' THEN Balance_USD END) AS Investment_Balance_USD
+      ,SUM(CASE WHEN Type = 'Investment' THEN Balance_EUR END) AS Investment_Balance_EUR
+  FROM ${ref("refined","vw_current_balance")}
+)
+SELECT CAST(CONCAT(a.AnoMes,'-',a.Dia) AS DATE) AS Data
+    ,a.Tipo
+    ,a.Classe
+    ,a.Nome
+    ,a.Moeda
+    ,a.Ativo
+    ,CASE WHEN a.AnoMes = SUBSTR(CAST(CURRENT_DATE AS STRING),1,7) THEN COALESCE(a.Pago_Recebido,0) 
+          WHEN a.AnoMes < SUBSTR(CAST(CURRENT_DATE AS STRING),1,7) THEN 1
+     ELSE 0 END AS Pago_Recebido
+    ,a.Valor * c.BRL AS Valor_BRL
+    ,a.Valor * c.USD AS Valor_USD
+    ,a.Valor * c.EUR AS Valor_EUR
+    ,CASE WHEN a.AnoMes = SUBSTR(CAST(CURRENT_DATE AS STRING),1,7) THEN 1 ELSE 0 END AS CurrentMonthFLG
+    ,CASE WHEN a.AnoMes = SUBSTR(CAST(CURRENT_DATE AS STRING),1,7) AND a.Dia >= EXTRACT(DAY FROM CURRENT_DATE) THEN 1 ELSE 0 END AS RemainingDaysFLG
+    ,b.Checking_Balance_BRL
+    ,b.Checking_Balance_USD
+    ,b.Checking_Balance_EUR
+    ,b.Investment_Balance_BRL
+    ,b.Investment_Balance_USD
+    ,b.Investment_Balance_EUR
+FROM ${ref("vw_monthly_costs")} a
+CROSS JOIN CurrentBalanceCTE b 
+LEFT JOIN ${ref("tb_sheet_currency_conversion")} c
+  ON a.Moeda = c.Moeda

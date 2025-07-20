@@ -1,0 +1,29 @@
+config {
+  type: "incremental"
+  ,schema: "refined"
+  ,uniqueKey: ["bankName","accountId"]
+}
+
+SELECT GENERATE_UUID() AS id
+  , id AS clientId
+  , NULL AS institutionId
+  , 'Nubank' AS bankName
+  , CAST(cpf AS STRING) AS accountId
+  , 'BRL' AS currency
+  , 'Personal' AS accountType
+  , FORMAT_DATE('%F %T',CURRENT_DATETIME()) AS dtinsert
+FROM ${ref("trusted", "tb_nubank_client")}
+
+UNION ALL 
+
+SELECT a.id
+  , a.clientId
+  , a.institutionId
+  , CASE WHEN a.institutionId = 'MILLENIUMBCP_BCOMPTPL' THEN 'Millenium BCP' ELSE a.institutionId END AS bankName
+  , a.iban AS accountId
+  , b.currency
+  , 'Personal' AS accountType
+  , FORMAT_DATE('%F %T',CURRENT_DATETIME()) AS dtinsert
+FROM ${ref("trusted", "tb_nordigen_meta")} AS a
+INNER JOIN ${ref("trusted", "tb_nordigen_details")} AS b ON a.iban = b.iban
+

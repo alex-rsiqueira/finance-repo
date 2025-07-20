@@ -1,0 +1,19 @@
+config {
+  type: "table"
+  ,schema: "refined"
+  ,bigquery: {partitionBy: "transactionDate"}
+}
+
+SELECT a.id as transactionId
+  , a.id_client as clientId
+  , a.bill_id as billId
+  , b.stablishmentId
+  , a.post_date as transactionDate
+  , a.type as transactionType
+  , a.category as transacitonCategory
+  , a.amount
+  , a.charge_index as instalmentNumber
+  , a.charges as instalmentsTotal
+FROM ${ref("trusted", "tb_nubank_bill_statements")} AS a 
+INNER JOIN ${ref("refined", "dim_stablishment")} AS b ON a.description = b.nm_stablishment_bill
+WHERE a.id_client IS NOT NULL

@@ -1,0 +1,19 @@
+config {
+  type: "incremental"
+  ,schema: "trusted"
+  ,uniqueKey: ["iban"]
+  ,bigquery: {partitionBy: "partitionDate"}
+  ,tags: ["nordigen"]
+}
+
+SELECT id
+    ,TIMESTAMP(created) AS created
+    ,TIMESTAMP(last_accessed) AS lastAccessed
+    ,iban
+    ,institution_id AS institutionId
+    ,status
+    ,owner_name AS ownerName
+    ,client_id AS clientId
+    ,current_date() AS partitionDate
+    ,current_datetime() as dtInsert
+FROM ${ref("raw","tb_nordigen_meta")}

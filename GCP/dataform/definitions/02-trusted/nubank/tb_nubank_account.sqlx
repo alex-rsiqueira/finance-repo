@@ -1,0 +1,46 @@
+config {
+  type: "table"
+  ,schema: "trusted"
+  ,bigquery: {partitionBy: "postDate"}
+  ,tags: ["nubank"]
+}
+
+with cte as (
+    SELECT id_client
+        ,id
+        ,case when typename = 'GenericFeedEvent' and title = 'Transferência recebida' then 'PixTransferInEvent'
+            when typename = 'GenericFeedEvent' and title = 'Transferência enviada' then 'PixTransferOutEvent'
+            when typename = 'GenericFeedEvent' and title = 'Reembolso enviado' then 'PixTransferOutReversalEvent'
+            when typename = 'GenericFeedEvent' and title = 'Transferência falhou' then 'PixTransferFailedEvent'
+            when typename = 'GenericFeedEvent' and title = 'Transferência agendada' then 'PixTransferScheduledEvent'
+        else typename
+        end typeName
+        ,title
+        ,detail
+        ,cast(postDate as date) as postDate
+        ,case when typename = 'DebitPurchaseEvent' then substring(detail,0,strpos(detail,'- R$')-1) else null end as stablishmentNm
+        ,case when (amount is null or amount = 'None') then trim(replace(replace(substring(detail,strpos(detail,'R$')+3,length(detail)),'.',''),',','.')) else amount end amount
+        ,case when title = 'Transferência recebida' and originAccount is null then initcap(trim(substring(detail,0,strpos(detail,'R$')-1))) else initcap(trim(originAccount)) end originAccount
+        ,case when title = 'Transferência enviada' and destinationAccount is null then initcap(trim(substring(detail,0,strpos(detail,'R$')-1))) else initcap(trim(destinationAccount)) end destinationAccount
+        ,format_date('%F %T',current_datetime()) as dtInsert
+    FROM (SELECT *
+            , row_number() over(partition by id_client,id order by dtinsert) row_id
+        FROM ${ref("raw", "tb_nubank_account")}) a 
+    WHERE row_id = 1
+    and id_client is not null
+    and typename not in ('WelcomeEvent','LendingTransferOutEvent','LendingTransferInEvent')
+    and title not in ('Transferência falhou','Falha no agendamento')
+    and detail not in ('NUBR33')
+)
+select id_client
+    ,id
+    ,typename
+    ,title
+    ,detail
+    ,postDate
+    ,stablishmentNm
+    ,case when title in ('Transferência enviada','Dinheiro guardado','Compra no débito','Pagamento efetuado','Pagamento da fatura') then -1 * cast(amount as float64) else cast(amount as float64) end as amount
+    ,originAccount
+    ,destinationAccount
+    ,dtinsert
+from cte

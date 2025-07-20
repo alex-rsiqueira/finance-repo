@@ -1,0 +1,16 @@
+config {
+  type: "view"
+  ,schema: "trusted"
+}
+
+SELECT REPLACE(RIGHT(AnoMes,LENGTH(AnoMes)-1),'_','-') AS AnoMes
+    ,IFNULL(Dia,16) AS Dia
+    ,Tipo
+    ,Classe
+    ,Nome
+    ,Moeda
+    ,Ativo
+    ,Pago_Recebido
+    ,Valor
+FROM ${ref("tb_sheet_monthly_costs_sim")}
+UNPIVOT(Valor FOR AnoMes IN (_2023_07, _2023_08, _2023_09, _2023_10, _2023_11, _2023_12, _2024_01, _2024_02, _2024_03, _2024_04, _2024_05, _2024_06, _2024_07, _2024_08, _2024_09, _2024_10, _2024_11, _2024_12, _2025_01, _2025_02, _2025_03, _2025_04, _2025_05, _2025_06, _2025_07, _2025_08, _2025_09, _2025_10, _2025_11, _2025_12))

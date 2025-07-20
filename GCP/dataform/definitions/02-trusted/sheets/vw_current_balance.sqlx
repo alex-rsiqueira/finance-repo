@@ -1,0 +1,12 @@
+config {
+  type: "view"
+  ,schema: "trusted"
+}
+
+SELECT Name
+    ,Owner
+    ,Bank
+    ,Type
+    ,Currency
+    ,Balance
+FROM ${ref("tb_sheet_current_balance")}

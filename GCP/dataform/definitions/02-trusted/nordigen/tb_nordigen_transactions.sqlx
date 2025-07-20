@@ -1,0 +1,53 @@
+config {
+  type: "incremental"
+  ,schema: "trusted"
+  ,uniqueKey: ["transactionId","clientId"]
+  ,bigquery: {partitionBy: "valueDate"}
+  ,tags: ["nordigen"]
+}
+
+WITH mapping AS (
+  SELECT 'COMPRA .* CONTACTLESS' AS pattern, 'Purchase - Contactless' AS value
+  UNION ALL
+  SELECT 'COMPRA .*', 'Purchase'
+  UNION ALL
+  SELECT 'TRF .*', 'Transfer'
+  UNION ALL
+  SELECT 'TRF MB WAY .*', 'MB Way'
+  UNION ALL
+  SELECT 'TRF. .* IRS ', 'IRS Reimbursement'
+  UNION ALL
+  SELECT 'PAG SERV .*', 'Service Payment'
+  UNION ALL
+  SELECT 'DD .*', 'Direct Debit'
+  UNION ALL
+  SELECT 'CRED. .*', 'Reimbursement'
+  UNION ALL
+  SELECT 'LEV .*', 'Withdraw'
+  UNION ALL
+  SELECT 'JUR .*', 'Interest'
+)
+SELECT a.transactionId
+    ,a.internalTransactionId
+    ,a.client_id AS clientId
+    ,b.institutionId
+    ,DATE(a.bookingDate) AS bookingDate
+    ,DATE(a.valueDate) AS valueDate
+    ,PARSE_DATETIME('%Y-%m-%d-%H.%M.%E6S', substr(a.transactionId,10,26)) AS transactionDateTime
+    ,a.remittanceInformationUnstructured
+    ,CASE 
+      WHEN CAST(a.transactionAmount_amount AS NUMERIC) < 0 THEN 'Debit' ELSE 'Credit' 
+     END type
+    ,COALESCE(
+      (SELECT value FROM mapping WHERE REGEXP_CONTAINS(a.remittanceInformationUnstructured, pattern) LIMIT 1),
+      'Other'
+     ) category
+    ,COALESCE(
+      (SELECT TRIM(REGEXP_EXTRACT(a.remittanceInformationUnstructured, REPLACE(pattern,'.*','(.*)'))) FROM mapping WHERE REGEXP_CONTAINS(a.remittanceInformationUnstructured, pattern) LIMIT 1),
+      a.remittanceInformationUnstructured
+     ) AS description
+    ,CAST(a.transactionAmount_amount AS NUMERIC) AS transactionAmount_amount
+    ,a.transactionAmount_currency
+    ,current_datetime() as dtInsert
+FROM ${ref("raw","tb_nordigen_transactions")} a
+LEFT JOIN ${ref("trusted","tb_nordigen_meta")} b ON a.client_id = b.clientId

@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "raw",
+  name: "tb_nubank_client",
+  description: "raw Nubank client data"
+}

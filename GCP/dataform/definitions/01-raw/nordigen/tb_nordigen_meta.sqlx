@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "raw",
+  name: "tb_nordigen_meta",
+  description: "raw Nordigen account metadata"
+}

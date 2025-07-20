@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "raw",
+  name: "tb_sheet_credit_card",
+  description: "raw spreadsheet credit card bill data"
+}

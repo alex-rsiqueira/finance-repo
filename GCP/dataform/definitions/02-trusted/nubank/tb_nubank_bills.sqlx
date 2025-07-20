@@ -1,0 +1,21 @@
+config {
+  type: "table"
+  ,schema: "trusted"
+  ,bigquery: {partitionBy: "open_date"}
+  ,tags: ["nubank"]
+}
+
+SELECT id_client
+    , bill_id
+    , bill_competence
+    , state
+    , CAST(open_date AS DATE) as open_date
+    , CAST(due_date AS DATE) as due_date
+    , CAST(total_balance AS DECIMAL)/100 AS total_balance
+    , CAST(minimum_payment AS DECIMAL)/100 AS minimum_payment
+    , format_date('%F %T',current_datetime()) as dtinsert
+FROM (SELECT *
+        , ROW_NUMBER() OVER(PARTITION BY id_client, bill_competence ORDER BY dtinsert DESC) as row_id
+      FROM ${ref("raw", "tb_nubank_bills")}
+      WHERE id_client IS NOT NULL) a
+WHERE row_id = 1

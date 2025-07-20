@@ -1,0 +1,17 @@
+config {
+  type: "incremental"
+  ,schema: "trusted"
+  ,uniqueKey: ["balanceType","clientId"]
+  ,bigquery: {partitionBy: "partitionDate"}
+  ,tags: ["nordigen"]
+}
+
+SELECT CAST(dtinsert AS DATETIME) as balanceDate
+    ,balanceType
+    ,balanceAmount_currency
+    ,balanceAmount_amount
+    ,lastChangeDateTime
+    ,client_id AS clientId
+    ,CAST(SUBSTR(dtinsert,1,10) AS DATE) AS partitionDate
+    ,current_datetime() as dtInsert
+FROM ${ref("raw","tb_nordigen_balances")}

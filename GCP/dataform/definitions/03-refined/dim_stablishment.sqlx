@@ -1,0 +1,26 @@
+config {
+  type: "incremental"
+  ,schema: "refined"
+  ,uniqueKey: ["nm_stablishment_bill"]
+}
+
+WITH cte_bill AS (
+        SELECT description as nm_stablishment_bill
+            , case 
+                when description like '%99*%' then '99 Pop'
+                when description like '% Extra %' then 'Extra'
+              else description
+              end nm_stablishment
+            , category as nm_category
+            , ROW_NUMBER() OVER(PARTITION BY description ORDER BY MAX(post_date) DESC) rnk_id
+        FROM ${ref("trusted", "tb_nubank_bill_statements")}
+        GROUP BY description
+            , category
+    )
+select GENERATE_UUID() AS stablishmentId
+    ,a.nm_stablishment_bill
+    ,coalesce(b.nm_stablishment,a.nm_stablishment) nm_stablishment
+    ,initcap(coalesce(b.nm_category,a.nm_category)) category
+    ,FORMAT_DATE('%F %T',CURRENT_DATETIME()) AS dtinsert
+from cte_bill a
+left join ${ref("trusted", "tb_sheet_credit_card_stab_ref")} b on a.nm_stablishment_bill = b.nm_stablishment_bill

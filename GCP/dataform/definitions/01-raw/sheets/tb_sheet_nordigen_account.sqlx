@@ -1,0 +1,6 @@
+config {
+  type: "declaration",
+  schema: "raw",
+  name: "tb_sheet_nordigen_account",
+  description: "Nordigen account data from Google Drive spreadsheet"
+}

@@ -1,0 +1,55 @@
+config {
+    type: "table",
+    schema: "trusted",
+    bigquery: {
+        partitionBy: "dt_partition"
+    },
+    tags: ["nubank"]
+}
+
+SELECT
+  id,
+  cpf,
+  name,
+  printed_name,
+  preferred_name,
+  email,
+  phone,
+  CAST(dob AS DATE) AS dob,
+  gender,
+  marital_status,
+  nationality,
+  profession,
+  reported_income,
+  invitations,
+  billing_address_postcode,
+  billing_address_line1,
+  billing_address_line2,
+  billing_address_number,
+  billing_address_city,
+  billing_address_state,
+  billing_address_locality,
+  billing_address_country,
+  address_postcode,
+  address_line1,
+  address_line2,
+  address_number,
+  address_city,
+  address_state,
+  address_locality,
+  address_country,
+  address_ref_point,
+  CAST(address_updated_at AS TIMESTAMP) AS address_updated_at,
+  CAST(last_atualizacao_cadastral_at AS TIMESTAMP) AS last_atualizacao_cadastral_at,
+  CAST(last_atualizacao_cadastral_at AS DATE) AS dt_partition,
+  FORMAT_DATE('%F %T',CURRENT_DATETIME()) AS dtinsert
+FROM (
+  SELECT
+    *,
+    ROW_NUMBER() OVER(PARTITION BY id ORDER BY dtinsert DESC) AS row_id
+  FROM
+    ${ref("raw", "tb_nubank_client")}
+  WHERE
+    id IS NOT NULL) a
+WHERE
+  row_id = 1

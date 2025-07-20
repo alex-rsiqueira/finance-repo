@@ -1,0 +1,29 @@
+config {
+  type: "table"
+  ,schema: "trusted"
+}
+
+WITH cte_stablishment AS (
+        SELECT COALESCE(TRIM(nome_estabelecimento),TRIM(estabelecimento)) AS nm_stablishment
+            , TRIM(estabelecimento) AS nm_stablishment_bill
+            , categoria AS nm_category
+            , MAX(data) AS last_order_date
+            , COUNT(0) qt_transactions
+        FROM ${ref("raw", "tb_sheet_credit_card")}
+        WHERE COALESCE(TRIM(nome_estabelecimento),TRIM(estabelecimento)) IS NOT NULL
+        GROUP BY nm_stablishment, nm_stablishment_bill, nm_category)
+    , cte_stablishment_rank AS (
+        SELECT nm_stablishment
+            , nm_stablishment_bill
+            , nm_category
+            , qt_transactions
+            , ROW_NUMBER() OVER(PARTITION BY nm_stablishment_bill ORDER BY last_order_date DESC) dedup_id
+            , ROW_NUMBER() OVER(PARTITION BY nm_stablishment ORDER BY qt_transactions DESC) rnk_num
+        FROM cte_stablishment)
+SELECT nm_stablishment_bill 
+    , nm_stablishment
+    , nm_category
+    , qt_transactions
+    , CASE WHEN rnk_num = 1 THEN 1 ELSE 0 END flg_main
+FROM cte_stablishment_rank 
+WHERE dedup_id = 1

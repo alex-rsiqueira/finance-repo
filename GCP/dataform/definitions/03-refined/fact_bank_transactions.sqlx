@@ -1,0 +1,45 @@
+config {
+  type: "table"
+  ,schema: "refined"
+  ,bigquery: {partitionBy: "transactionDate"}
+}
+
+SELECT a.transactionId
+  , a.clientId
+  , b.id AS bankId
+  , DATE(a.transactionDateTime) AS transactionDate
+  , a.transactionDateTime
+  , a.type as transactionType
+  , CASE WHEN STRPOS(a.remittanceInformationUnstructured,'MB WAY') > 0 THEN 'MB Way'
+         WHEN LEFT(a.remittanceInformationUnstructured,3) = 'TRF' THEN 'Bank Transfer'
+         WHEN LEFT(a.remittanceInformationUnstructured,6) = 'COMPRA' THEN 'Debit Card'
+    END AS paymentType
+  , a.description AS stablishmentNm
+  , a.category
+  , a.description
+  , a.transactionAmount_amount as amount
+  , FORMAT_DATE('%F %T',CURRENT_DATETIME()) AS dtinsert
+FROM ${ref("trusted", "tb_nordigen_transactions")} a
+LEFT JOIN ${ref("refined", "dim_bank_account")} b ON a.clientId = b.clientId AND b.institutionId = a.institutionId
+
+UNION ALL
+
+SELECT a.id as transactionId
+  , a.id_client as clientId
+  , b.id AS bankId
+  , a.postDate as transactionDate
+  , null as transactionDateTime
+  , CASE WHEN a.amount > 0 THEN 'credit' ELSE 'debit' END AS transactionType
+  , CASE WHEN LEFT(a.typename,3) = 'Pix' THEN 'Pix'
+         WHEN LEFT(a.typename,8) = 'Transfer' THEN 'Bank Transfer'
+         WHEN STRPOS(a.typename, 'Payment') > 0 THEN 'Bank Payment'
+         WHEN (STRPOS(a.typename, 'Reserve') > 0 OR STRPOS(a.typename, 'LockMoney') > 0) THEN 'Savings'
+         WHEN a.typename = 'DebitPurchaseEvent' THEN 'Debit Card'
+    END AS paymentType
+  , a.stablishmentNm as stablishmentNm
+  , NULL AS category
+  , NULL AS description
+  , a.amount
+  , FORMAT_DATE('%F %T',CURRENT_DATETIME()) AS dtinsert
+FROM ${ref("trusted", "tb_nubank_account")} a
+LEFT JOIN ${ref("refined", "dim_bank_account")} b ON a.id_client = b.clientId AND b.bankName = 'Nubank'
