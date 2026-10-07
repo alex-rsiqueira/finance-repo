@@ -1,0 +1,67 @@
+name: Deploy Nordigen ingestion
+
+# A merge to main that touches the Nordigen function deploys it straight after
+# CI. Same keyless sign-in and deploy account as finance-backend and
+# finance-frontend (DEPLOY_SA_PROD, `production` environment). The function is
+# not invoked here: GoCardless allows few calls per account and day, so the
+# first run after a deploy is the scheduled 08:00 one.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "GCP/cloud-function/atualiza-dados-nordigen/**"
+      - ".github/workflows/deploy-nordigen.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # WIF - keyless auth to Google Cloud
+
+concurrency:
+  group: deploy-nordigen
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA_PROD }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy atualiza-dados-nordigen
+        # Builds from the folder (tests/ left out by .gcloudignore). Everything
+        # the service depends on is named, so a deploy never drifts from it:
+        # the account it runs as, PROJECT_ID, one instance at most, 5 minutes.
+        # DATASET is not set, so it writes to raw.
+        run: |
+          gcloud run deploy atualiza-dados-nordigen \
+            --source GCP/cloud-function/atualiza-dados-nordigen \
+            --function main \
+            --base-image python311 \
+            --project finances-314506 \
+            --region us-central1 \
+            --service-account 16973409618-compute@developer.gserviceaccount.com \
+            --memory 512Mi --cpu 1 --max-instances 1 --timeout 300 \
+            --update-env-vars "PROJECT_ID=finances-314506"
+
+      - name: Check the new revision is serving
+        run: |
+          read -r READY LATEST MEMORY <<< "$(gcloud run services describe atualiza-dados-nordigen \
+            --project finances-314506 --region us-central1 \
+            --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].resources.limits.memory)')"
+          echo "ready=$READY latest=$LATEST memory=$MEMORY"
+          test "$READY" = "$LATEST"
+          test "$MEMORY" = "512Mi"
