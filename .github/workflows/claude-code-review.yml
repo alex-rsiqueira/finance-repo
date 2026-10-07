@@ -1,0 +1,208 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+    # Optional: Only run on specific file changes
+    # paths:
+    #   - "src/**/*.ts"
+    #   - "src/**/*.tsx"
+    #   - "src/**/*.js"
+    #   - "src/**/*.jsx"
+
+# A new commit on the PR supersedes the review of the previous one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  claude-review:
+    # Optional: Filter by PR author
+    # if: |
+    #   github.event.pull_request.user.login == 'external-contributor' ||
+    #   github.event.pull_request.user.login == 'new-developer' ||
+    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # post the review summary as a PR comment
+      issues: write          # PR comments ride the issues API
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        env:
+          # The real lever for the backgrounded-agents failure. The prompt asks
+          # for foreground agents and is not reliably obeyed — the review kept
+          # ending its turn awaiting a notification a headless run never sends.
+          # This env var (Claude Code v2.1.4+) removes auto-backgrounding
+          # outright, so agents cannot be left outstanding. Inert on older
+          # versions, so it costs nothing if this runner predates it.
+          CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
+          plugins: 'code-review@claude-code-plugins'
+          # The review posts its own summary comment; --comment is what asks for
+          # it. An extra "also post a comment" instruction here just gets it
+          # posted twice.
+          # The trailing instruction is load-bearing, not decoration. The review
+          # launches its agents with the background flag unset, the runtime
+          # defaults them to background, and the main agent then ends its turn to
+          # await a notification that a single-shot headless run never delivers:
+          # "No action needed — I'll be notified automatically when the
+          # eligibility check agent finishes", subagent_stats spawned 1 /
+          # completed 0, session over in 12s with nothing posted.
+          prompt: |
+            /code-review:code-review --comment ${{ github.repository }}/pull/${{ github.event.pull_request.number }}
+
+            Run every agent in the FOREGROUND and wait for each one to return
+            before continuing. Do not end your turn while any agent is still
+            running: this is a single-shot headless run with nobody to notify,
+            so a backgrounded agent is a review that silently never happens.
+
+            Two amendments to the command's own step 1, which otherwise stops
+            as soon as it sees a comment of its own on this PR:
+
+            - Having reviewed this PR before is NOT a reason to stop if commits
+              have landed since that review. Compare the head SHA against the
+              newest review comment; if the code has moved, review it again.
+              Stop only when the PR is closed, is a draft, or has had no new
+              commits since the last review.
+            - Before reviewing, read your own unresolved inline comments from
+              the previous round and check each against the CURRENT code. For
+              every one that has been addressed, resolve the thread with
+              `gh api graphql` and resolveReviewThread, and say in the summary
+              which ones you resolved. Leave anything still outstanding open —
+              never resolve a thread you have not verified against the code,
+              and never resolve someone else's.
+
+            Then post the review as ONE summary comment, in addition to any
+            inline comments, with:
+
+              gh pr comment ${{ github.event.pull_request.number }} \
+                --edit-last --create-if-none --body-file <file>
+
+            `--edit-last` is what keeps a re-run from stacking a second copy:
+            it rewrites the comment this workflow left last time, so the PR
+            carries one summary reflecting the current commit rather than a
+            pile of stale ones. `--create-if-none` covers the first run, when
+            there is nothing to edit yet.
+          # This list IS the allowlist handed to the SDK — the slash command's own
+          # `allowed-tools:` frontmatter does not widen it, and "the base GitHub
+          # tools are always included" means the action's MCP tools, not Bash.
+          #
+          # --allowedTools is REQUIRED, and this list is the whole allowlist.
+          #
+          # Removing the flag does not relax it — it empties it, and `Skill` is
+          # denied, which kills the review outright because
+          # /code-review:code-review is invoked THROUGH the Skill tool. That was
+          # tried and it failed exactly that way.
+          #
+          # So the list stays, but it stops being a command-matching puzzle.
+          # `Bash(gh:*)`-style patterns match only the FIRST command in a line,
+          # so `gh api … | python3 -c …` had its second half denied and the
+          # review could not read its own prior comments. Bare `Bash` ends that
+          # class of failure. What actually bounds this job is the permissions:
+          # block above — contents read, pull-requests and issues write, on an
+          # ephemeral runner — not a second, worse copy of it here.
+          claude_args: >-
+            --allowedTools "Skill,Task,mcp__github_inline_comment__create_inline_comment,Bash,Read,Grep,Glob,Write"
+            --disallowedTools "WebSearch,WebFetch"
+          # Without this the denied tool is redacted from the run log, which is
+          # what made the silent failure above take a round trip to diagnose.
+          show_full_output: true
+
+      # A review that did not happen must not look like a review that found
+      # nothing. Every failure mode in this file's history exited 0: the action
+      # skipping on workflow validation, a denied tool, and the main agent
+      # ending its turn while its subagents were still running. Each one put a
+      # green tick on a PR nobody had reviewed, which is worse than a red one.
+      # It skips only when the run is cancelled: a review superseded by a newer
+      # commit is not an unreviewed PR.
+      - name: The review must actually have reviewed something
+        if: ${{ !cancelled() }}
+        shell: bash
+        env:
+          EXEC: ${{ steps.claude-review.outputs.execution_file }}
+        run: |
+          if [ -z "$EXEC" ] || [ ! -s "$EXEC" ]; then
+            echo "::error::The review never called the model — no execution log was written."
+            echo "::error::Most likely workflow validation: .github/workflows/claude-code-review.yml"
+            echo "::error::must be byte-identical to the copy on the DEFAULT branch (main)."
+            exit 1
+          fi
+          python3 - "$EXEC" <<'CHECK'
+          import json, sys
+
+          raw = json.load(open(sys.argv[1]))
+          msgs = raw if isinstance(raw, list) else [raw]
+          result = next((m for m in reversed(msgs)
+                         if isinstance(m, dict) and m.get("type") == "result"), None)
+
+          fails = []
+          if result is None:
+              fails.append("the execution log carries no result — the session ended abnormally")
+          else:
+              if result.get("is_error"):
+                  fails.append(f"Claude reported an error: {result.get('result') or 'no detail'}")
+
+              # WebSearch and WebFetch are denied on purpose above: the review
+              # command's own notes say to use the gh CLI and not the web, so
+              # reaching for them is a detour, not a blocked capability. Failing
+              # the job over a denial we asked for would make the guard cry wolf
+              # exactly where it should stay quiet.
+              DELIBERATE = {"WebSearch", "WebFetch"}
+              # Edit and Write are not in the review command's tool list, and a
+              # reviewer that wants to reproduce a finding reaches for them to
+              # write a throwaway test into its own ephemeral checkout. Denying
+              # that costs the reproduction, not the review: the review still
+              # runs and posts its comment. Failing the job over it turned two
+              # complete reviews red (finance-frontend #4, 2026-09-14, and
+              # finance-backend #23, 2026-09-28), so they are reported, not failed.
+              SCRATCH = {"Edit", "Write"}
+              all_denied = result.get("permission_denials") or []
+              scratch = sorted({d.get("tool_name") for d in all_denied
+                                if d.get("tool_name") in SCRATCH})
+              if scratch:
+                  print(f"::notice::the reviewer tried to write in its checkout "
+                        f"({', '.join(scratch)}) and was refused; the review itself ran")
+              denied = [d for d in all_denied
+                        if d.get("tool_name") not in DELIBERATE | SCRATCH]
+              if denied:
+                  names = ", ".join(sorted({d.get("tool_name", "?") for d in denied}))
+                  fails.append(f"tools were denied ({names}) — something is constraining "
+                               "the tool list; the review cannot do its job without them")
+
+              # Only when agents were BACKGROUNDED and left outstanding. That is
+              # the real pathology: the turn ends awaiting a notification a
+              # headless run never sends. `completed` is not reliably populated
+              # for foreground agents, and keying on it alone failed a review
+              # that had run fine and posted its summary.
+              agents = result.get("subagent_stats") or {}
+              spawned = agents.get("spawned", 0)
+              backgrounded = agents.get("started_in_background", 0)
+              done = agents.get("completed", 0)
+              if backgrounded and done < spawned:
+                  fails.append(f"{backgrounded} agent(s) were left running in the "
+                               "background — the turn ended without waiting for them")
+
+          for f in fails:
+              print(f"::error::{f}")
+          if fails:
+              print("::error::Treat this as an unreviewed PR, not a clean one.")
+              sys.exit(1)
+          print("The review ran to completion with no blocking denials.")
+          CHECK
+
+          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
+          # or https://code.claude.com/docs/en/cli-reference for available options
+

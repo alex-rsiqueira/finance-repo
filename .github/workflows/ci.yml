@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main, dev-alex]
+  pull_request:
+
+# A new commit on a PR supersedes the run for the previous one. Pushes to
+# main/dev-alex fall back to the run id, so they never cancel or queue.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        # google-cloud-secret-manager 2.10.0 imports pkg_resources, which
+        # setuptools 81 removed.
+        run: pip install -r GCP/cloud-function/atualiza-dados-nordigen/requirements.txt "setuptools<81" pytest ruff
+
+      - name: Lint (fatal problems only)
+        # Syntax errors and undefined names, in every Cloud Function. Not a
+        # style gate.
+        run: ruff check --select E9,F63,F7,F82 GCP/cloud-function
+
+      - name: Tests (Nordigen ingestion)
+        working-directory: GCP/cloud-function/atualiza-dados-nordigen
+        run: python -m pytest -q tests
