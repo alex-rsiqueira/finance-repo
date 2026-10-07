@@ -4,9 +4,11 @@ on:
   push:
     branches: [main, dev-alex]
   pull_request:
+  workflow_call:   # reused as the gate inside deploy-nordigen.yml
 
 # A new commit on a PR supersedes the run for the previous one. Pushes to
-# main/dev-alex fall back to the run id, so they never cancel or queue.
+# main/dev-alex and calls from the deploy workflow fall back to the run id, so
+# they never cancel, never queue, and never share the calling deploy's group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
