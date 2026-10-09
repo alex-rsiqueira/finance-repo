@@ -46,6 +46,9 @@ jobs:
         # the service depends on is named, so a deploy never drifts from it:
         # the account it runs as, PROJECT_ID, one instance at most, 5 minutes.
         # DATASET is not set, so it writes to raw.
+        # The Pub/Sub trigger gets its 200 within seconds while the run goes on
+        # for minutes, so CPU stays allocated outside requests: with throttling
+        # on, the calls to the bank stall until GoCardless drops them.
         run: |
           gcloud run deploy atualiza-dados-nordigen \
             --source GCP/cloud-function/atualiza-dados-nordigen \
@@ -54,7 +57,7 @@ jobs:
             --project finances-314506 \
             --region us-central1 \
             --service-account 16973409618-compute@developer.gserviceaccount.com \
-            --memory 512Mi --cpu 1 --max-instances 1 --timeout 300 \
+            --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --timeout 300 \
             --update-env-vars "PROJECT_ID=finances-314506"
 
       - name: Check the new revision is serving
@@ -62,6 +65,10 @@ jobs:
           read -r READY LATEST MEMORY <<< "$(gcloud run services describe atualiza-dados-nordigen \
             --project finances-314506 --region us-central1 \
             --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].resources.limits.memory)')"
-          echo "ready=$READY latest=$LATEST memory=$MEMORY"
+          THROTTLING="$(gcloud run services describe atualiza-dados-nordigen \
+            --project finances-314506 --region us-central1 --format json \
+            | jq -r '.spec.template.metadata.annotations["run.googleapis.com/cpu-throttling"] // "unset"')"
+          echo "ready=$READY latest=$LATEST memory=$MEMORY cpu-throttling=$THROTTLING"
           test "$READY" = "$LATEST"
           test "$MEMORY" = "512Mi"
+          test "$THROTTLING" = "false"
