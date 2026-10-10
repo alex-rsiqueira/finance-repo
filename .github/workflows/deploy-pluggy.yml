@@ -1,0 +1,80 @@
+name: Deploy Pluggy ingestion
+
+# A merge to main that touches the Pluggy function deploys it straight after
+# CI. Same keyless sign-in and deploy account as deploy-nordigen.yml
+# (DEPLOY_SA_PROD, `production` environment). The function is not invoked
+# here: the first run after a deploy is the scheduled 08:15 one.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "GCP/cloud-function/atualiza-dados-pluggy/**"
+      - ".github/workflows/deploy-pluggy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # WIF - keyless auth to Google Cloud
+
+concurrency:
+  group: deploy-pluggy
+  cancel-in-progress: false
+
+env:
+  # Meu Pluggy items to load, comma-separated (plan pluggy-ingestion D-6).
+  # A new bank authorised in Meu Pluggy is one more id here.
+  PLUGGY_ITEM_IDS: b10bd943-0721-445b-8bd8-4770a87c9a6a
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA_PROD }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy atualiza-dados-pluggy
+        # Builds from the folder (tests/ left out by .gcloudignore). Everything
+        # the service depends on is named, so a deploy never drifts from it:
+        # the account it runs as, PROJECT_ID, the items, one instance at most,
+        # 5 minutes. DATASET is not set, so it writes to raw. CPU stays
+        # allocated outside requests, as for Nordigen. The env vars use @ as
+        # separator so the comma-separated item list stays one value.
+        run: |
+          gcloud run deploy atualiza-dados-pluggy \
+            --source GCP/cloud-function/atualiza-dados-pluggy \
+            --function main \
+            --base-image python311 \
+            --project finances-314506 \
+            --region us-central1 \
+            --service-account 16973409618-compute@developer.gserviceaccount.com \
+            --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --timeout 300 \
+            --no-allow-unauthenticated \
+            --update-env-vars "^@^PROJECT_ID=finances-314506@PLUGGY_ITEM_IDS=${PLUGGY_ITEM_IDS}"
+
+      - name: Check the new revision is serving
+        run: |
+          read -r READY LATEST MEMORY <<< "$(gcloud run services describe atualiza-dados-pluggy \
+            --project finances-314506 --region us-central1 \
+            --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].resources.limits.memory)')"
+          SERVICE="$(gcloud run services describe atualiza-dados-pluggy \
+            --project finances-314506 --region us-central1 --format json)"
+          THROTTLING="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/cpu-throttling"] // "unset"' <<< "$SERVICE")"
+          ITEMS="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_ITEM_IDS") | .value' <<< "$SERVICE")"
+          echo "ready=$READY latest=$LATEST memory=$MEMORY cpu-throttling=$THROTTLING items=$ITEMS"
+          test "$READY" = "$LATEST"
+          test "$MEMORY" = "512Mi"
+          test "$THROTTLING" = "false"
+          test "$ITEMS" = "$PLUGGY_ITEM_IDS"
