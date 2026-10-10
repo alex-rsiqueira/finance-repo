@@ -26,7 +26,11 @@ jobs:
       - name: Install
         # google-cloud-secret-manager 2.10.0 imports pkg_resources, which
         # setuptools 81 removed.
-        run: pip install -r GCP/cloud-function/atualiza-dados-nordigen/requirements.txt "setuptools<81" pytest ruff
+        run: >-
+          pip install
+          -r GCP/cloud-function/atualiza-dados-nordigen/requirements.txt
+          -r GCP/cloud-function/atualiza-dados-pluggy/requirements.txt
+          "setuptools<81" pytest ruff
 
       - name: Lint (fatal problems only)
         # Syntax errors and undefined names, in every Cloud Function. Not a
@@ -35,4 +39,8 @@ jobs:
 
       - name: Tests (Nordigen ingestion)
         working-directory: GCP/cloud-function/atualiza-dados-nordigen
+        run: python -m pytest -q tests
+
+      - name: Tests (Pluggy ingestion)
+        working-directory: GCP/cloud-function/atualiza-dados-pluggy
         run: python -m pytest -q tests
