@@ -50,8 +50,12 @@ jobs:
         # the service depends on is named, so a deploy never drifts from it:
         # the account it runs as, PROJECT_ID, the items, one instance at most,
         # 5 minutes. DATASET is not set, so it writes to raw. CPU stays
-        # allocated outside requests, as for Nordigen. The env vars use @ as
-        # separator so the comma-separated item list stays one value.
+        # allocated outside requests, as for Nordigen. main(event, context) is
+        # a Pub/Sub event function: without FUNCTION_SIGNATURE_TYPE=event the
+        # Functions Framework calls it as an HTTP function, with one argument
+        # (the Nordigen service has the same variable from its Cloud Functions
+        # origin). The env vars use @ as separator so the comma-separated item
+        # list stays one value.
         run: |
           gcloud run deploy atualiza-dados-pluggy \
             --source GCP/cloud-function/atualiza-dados-pluggy \
@@ -62,7 +66,7 @@ jobs:
             --service-account 16973409618-compute@developer.gserviceaccount.com \
             --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --timeout 300 \
             --no-allow-unauthenticated \
-            --update-env-vars "^@^PROJECT_ID=finances-314506@PLUGGY_ITEM_IDS=${PLUGGY_ITEM_IDS}"
+            --update-env-vars "^@^PROJECT_ID=finances-314506@FUNCTION_SIGNATURE_TYPE=event@PLUGGY_ITEM_IDS=${PLUGGY_ITEM_IDS}"
 
       - name: Check the new revision is serving
         run: |
@@ -73,8 +77,10 @@ jobs:
             --project finances-314506 --region us-central1 --format json)"
           THROTTLING="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/cpu-throttling"] // "unset"' <<< "$SERVICE")"
           ITEMS="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_ITEM_IDS") | .value' <<< "$SERVICE")"
-          echo "ready=$READY latest=$LATEST memory=$MEMORY cpu-throttling=$THROTTLING items=$ITEMS"
+          SIGNATURE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FUNCTION_SIGNATURE_TYPE") | .value' <<< "$SERVICE")"
+          echo "ready=$READY latest=$LATEST memory=$MEMORY cpu-throttling=$THROTTLING items=$ITEMS signature=$SIGNATURE"
           test "$READY" = "$LATEST"
           test "$MEMORY" = "512Mi"
           test "$THROTTLING" = "false"
           test "$ITEMS" = "$PLUGGY_ITEM_IDS"
+          test "$SIGNATURE" = "event"
