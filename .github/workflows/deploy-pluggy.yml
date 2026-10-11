@@ -55,7 +55,9 @@ jobs:
         # Functions Framework calls it as an HTTP function, with one argument
         # (the Nordigen service has the same variable from its Cloud Functions
         # origin). The env vars use @ as separator so the comma-separated item
-        # list stays one value.
+        # list stays one value. One request at a time: Pub/Sub redelivers a
+        # message it is still waiting on, and two runs at once would load the
+        # same snapshot twice.
         run: |
           gcloud run deploy atualiza-dados-pluggy \
             --source GCP/cloud-function/atualiza-dados-pluggy \
@@ -64,23 +66,24 @@ jobs:
             --project finances-314506 \
             --region us-central1 \
             --service-account 16973409618-compute@developer.gserviceaccount.com \
-            --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --timeout 300 \
+            --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --concurrency 1 --timeout 300 \
             --no-allow-unauthenticated \
             --update-env-vars "^@^PROJECT_ID=finances-314506@FUNCTION_SIGNATURE_TYPE=event@PLUGGY_ITEM_IDS=${PLUGGY_ITEM_IDS}"
 
       - name: Check the new revision is serving
         run: |
-          read -r READY LATEST MEMORY <<< "$(gcloud run services describe atualiza-dados-pluggy \
+          read -r READY LATEST MEMORY CONCURRENCY <<< "$(gcloud run services describe atualiza-dados-pluggy \
             --project finances-314506 --region us-central1 \
-            --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].resources.limits.memory)')"
+            --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].resources.limits.memory,spec.template.spec.containerConcurrency)')"
           SERVICE="$(gcloud run services describe atualiza-dados-pluggy \
             --project finances-314506 --region us-central1 --format json)"
           THROTTLING="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/cpu-throttling"] // "unset"' <<< "$SERVICE")"
           ITEMS="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_ITEM_IDS") | .value' <<< "$SERVICE")"
           SIGNATURE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FUNCTION_SIGNATURE_TYPE") | .value' <<< "$SERVICE")"
-          echo "ready=$READY latest=$LATEST memory=$MEMORY cpu-throttling=$THROTTLING items=$ITEMS signature=$SIGNATURE"
+          echo "ready=$READY latest=$LATEST memory=$MEMORY concurrency=$CONCURRENCY cpu-throttling=$THROTTLING items=$ITEMS signature=$SIGNATURE"
           test "$READY" = "$LATEST"
           test "$MEMORY" = "512Mi"
+          test "$CONCURRENCY" = "1"
           test "$THROTTLING" = "false"
           test "$ITEMS" = "$PLUGGY_ITEM_IDS"
           test "$SIGNATURE" = "event"
