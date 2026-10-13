@@ -44,7 +44,7 @@ class FakeApi:
     def add_item(self, item_id, status="UPDATED", consent="2027-10-09T18:47:45.492Z", **fields):
         self.items[item_id] = {"id": item_id, "connector": {"id": 200, "name": "MeuPluggy"},
                                "status": status, "executionStatus": "SUCCESS",
-                               "lastUpdatedAt": "2026-10-09T23:33:19.737Z", "consentExpiresAt": consent,
+                               "lastUpdatedAt": "2026-10-10T23:33:19.737Z", "consentExpiresAt": consent,
                                **fields}
         self.accounts.setdefault(item_id, [])
         self.investments.setdefault(item_id, [[]])

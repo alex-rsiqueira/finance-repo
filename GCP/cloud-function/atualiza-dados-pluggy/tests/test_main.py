@@ -62,6 +62,37 @@ def test_consent_ending_after_30_days_logs_nothing(env):
     assert env.log("consent_expiring") == []
 
 
+def test_an_item_refreshed_exactly_36_hours_ago_is_not_reported(env):
+    env.api.add_item(ITEM_1, lastUpdatedAt="2026-10-09T19:15:00.000Z")
+    env.api.add_account(ITEM_1, CHECKING)
+    env.run_at(FIRST)
+    assert env.log("item_stale") == []
+
+
+def test_an_item_not_refreshed_for_36_hours_and_a_second_is_reported_and_still_loads(env):
+    env.api.add_item(ITEM_1, lastUpdatedAt="2026-10-09T19:14:59.000Z")
+    env.api.add_account(ITEM_1, CHECKING, transactions=[[transaction("t1")]])
+    env.run_at(FIRST)
+    stale = env.log("item_stale")
+    assert len(stale) == 1 and stale[0]["end_point"] == ITEM_1
+    assert stale[0]["message"] == ("not refreshed since 2026-10-09 19:14 UTC; "
+                                   "check the connection in Meu Pluggy")
+    assert len(env.rows("tb_pluggy_transactions")) == 1
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+
+
+def test_a_stale_item_beside_a_healthy_one_is_the_only_one_reported(env):
+    env.items(ITEM_1, ITEM_2)
+    env.api.add_item(ITEM_1, lastUpdatedAt="2026-10-08T07:15:00.000Z")
+    env.api.add_account(ITEM_1, "acc-of-item-1", transactions=[[transaction("x")]])
+    env.api.add_item(ITEM_2)
+    env.api.add_account(ITEM_2, CHECKING, transactions=[[transaction("t1")]])
+    env.run_at(FIRST)
+    assert [r["end_point"] for r in env.log("item_stale")] == [ITEM_1]
+    assert {r["account_id"] for r in env.rows("tb_pluggy_transactions")} == {"acc-of-item-1", CHECKING}
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+
+
 def test_server_error_is_retried_honouring_retry_after_then_loads(env):
     one_item(env)
     env.api.failures["/v2/transactions"] = [503]

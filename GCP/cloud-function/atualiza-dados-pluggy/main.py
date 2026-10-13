@@ -11,8 +11,10 @@ the investments and their transactions. Each table gets one temp table and one M
   tb_pluggy_investment_transactions        dtinsert is the first run, last_seen_dtinsert the latest
 
 An item whose status is not UPDATED gets its snapshot row only: its data is not read, an error
-is logged and the run fails. An item whose consent ends within CONSENT_WARNING_DAYS loads as
-usual and logs an error. A failing item does not stop the others, but the run then raises, so
+is logged and the run fails. An item whose consent ends within CONSENT_WARNING_DAYS, or that
+Meu Pluggy has not refreshed for more than STALE_AFTER (lastUpdatedAt), loads as usual and logs an
+error: a connection deleted in Meu Pluggy keeps answering with its last snapshot, so nothing else
+would fail while its figures freeze (plan pluggy-ingestion D-14). A failing item does not stop the others, but the run then raises, so
 the execution is reported as failed. Every row of a run carries the same dtinsert.
 """
 import json
@@ -29,6 +31,7 @@ DATASET = os.environ.get("DATASET", "raw")
 ITEM_IDS = [i.strip() for i in os.environ.get("PLUGGY_ITEM_IDS", "").split(",") if i.strip()]
 LOG_TABLE = "tb_pluggy_ingestion_log"
 CONSENT_WARNING_DAYS = 30
+STALE_AFTER = timedelta(hours=36)
 REAUTHORISE = "authorise again in Meu Pluggy"
 
 # raw table: (parent id column, record id column, {column: field in the record}, snapshot)
@@ -128,6 +131,13 @@ def load_item(bq, client, item_id, dtinsert, started):
         log_event(bq, "consent_expiring", "error",
                   {"item_id": item_id, "consentExpiresAt": consent,
                    "error": f"consent ends {consent[:10]}: {REAUTHORISE}"})
+
+    updated = item.get("lastUpdatedAt")
+    if updated and started - datetime.fromisoformat(updated.replace("Z", "+00:00")) > STALE_AFTER:
+        log_event(bq, "item_stale", "error",
+                  {"item_id": item_id, "lastUpdatedAt": updated,
+                   "error": f"not refreshed since {updated[:16].replace('T', ' ')} UTC; "
+                            "check the connection in Meu Pluggy"})
 
     records = {table: [] for table in TABLES if table != "tb_pluggy_items"}
     for account in client.accounts(item_id):

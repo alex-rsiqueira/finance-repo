@@ -22,9 +22,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Meu Pluggy items to load, comma-separated (plan pluggy-ingestion D-6).
-  # A new bank authorised in Meu Pluggy is one more id here.
-  PLUGGY_ITEM_IDS: b10bd943-0721-445b-8bd8-4770a87c9a6a
+  # Meu Pluggy items to load, comma-separated (plan pluggy-ingestion D-6), from
+  # the repository variable PLUGGY_ITEM_IDS (Settings > Secrets and variables >
+  # Actions > Variables). A new bank authorised in Meu Pluggy, or a connection
+  # deleted and made again there (a new item id, D-14), is a change to that
+  # variable and a re-run of this workflow (Run workflow), not a commit.
+  PLUGGY_ITEM_IDS: ${{ vars.PLUGGY_ITEM_IDS }}
 
 jobs:
   ci:
@@ -37,6 +40,12 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
+
+      - name: Check the item ids are set
+        # An unset variable would deploy a function that loads nothing.
+        run: |
+          echo "items=$PLUGGY_ITEM_IDS"
+          test -n "$PLUGGY_ITEM_IDS"
 
       - uses: google-github-actions/auth@v2
         with:
