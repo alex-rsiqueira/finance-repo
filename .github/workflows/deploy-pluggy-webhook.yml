@@ -1,0 +1,81 @@
+name: Deploy Pluggy webhook
+
+# A merge to main that touches the webhook function deploys it straight after
+# CI. Same keyless sign-in and deploy account as deploy-pluggy.yml
+# (DEPLOY_SA_PROD, `production` environment).
+#
+# The service answers Pluggy's item webhooks (plan pluggy-transactions §3.3),
+# so it is public to the internet and checks a shared secret header on every
+# call instead: PLUGGY_WEBHOOK_SECRET comes from the Secret Manager secret
+# Pluggy_webhook_secret, never from a variable or this file. The same value is
+# given to Pluggy once, when the webhook is registered (POST /webhooks with
+# headers {"X-Finance-Webhook-Key": ...}); the runtime account needs
+# roles/secretmanager.secretAccessor on that secret.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "GCP/cloud-function/pluggy-webhook/**"
+      - ".github/workflows/deploy-pluggy-webhook.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # WIF - keyless auth to Google Cloud
+
+concurrency:
+  group: deploy-pluggy-webhook
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA_PROD }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy pluggy-webhook
+        # An HTTP function (main(request); no FUNCTION_SIGNATURE_TYPE). Public,
+        # so Pluggy can reach it; the secret header is the gate. Small and
+        # rare: a few calls a year, each answered within Pluggy's 10 s, so two
+        # instances and the default concurrency are plenty. DATASET is not set,
+        # so it writes to raw.
+        run: |
+          gcloud run deploy pluggy-webhook \
+            --source GCP/cloud-function/pluggy-webhook \
+            --function main \
+            --base-image python311 \
+            --project finances-314506 \
+            --region us-central1 \
+            --service-account 16973409618-compute@developer.gserviceaccount.com \
+            --memory 256Mi --cpu 1 --max-instances 2 --timeout 30 \
+            --allow-unauthenticated \
+            --update-env-vars "PROJECT_ID=finances-314506" \
+            --update-secrets "PLUGGY_WEBHOOK_SECRET=Pluggy_webhook_secret:latest"
+
+      - name: Check the new revision is serving
+        run: |
+          read -r READY LATEST URL <<< "$(gcloud run services describe pluggy-webhook \
+            --project finances-314506 --region us-central1 \
+            --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,status.url)')"
+          SERVICE="$(gcloud run services describe pluggy-webhook \
+            --project finances-314506 --region us-central1 --format json)"
+          SECRET="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_WEBHOOK_SECRET") | .valueFrom.secretKeyRef.name' <<< "$SERVICE")"
+          echo "ready=$READY latest=$LATEST url=$URL secret=$SECRET"
+          test "$READY" = "$LATEST"
+          test "$SECRET" = "Pluggy_webhook_secret"
+          # A call without the header is refused, never retried by Pluggy.
+          test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' -d '{}')" = "403"

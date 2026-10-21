@@ -15,6 +15,7 @@ import main  # noqa: E402
 import pluggy_api  # noqa: E402
 
 LOG = "test-project.raw.tb_pluggy_ingestion_log"
+REGISTRY = "test-project.raw.tb_pluggy_item_registry"
 ITEM_1 = "item-1"
 ITEM_2 = "item-2"
 
@@ -141,7 +142,13 @@ class FakeBigQuery:
         self.tables = FakeBigQuery.tables
         self.merges = FakeBigQuery.merges
 
-    def query(self, sql):
+    def query(self, sql, job_config=None):
+        if job_config is not None and job_config.query_parameters:
+            return self.registry_merge(sql, {p.name: p.value for p in job_config.query_parameters})
+        if sql.strip().startswith("SELECT"):
+            assert f"`{REGISTRY}`" in sql and "deleted_at IS NULL" in sql, sql
+            rows = [r for r in self.tables.get(REGISTRY, []) if r.get("deleted_at") is None]
+            return Done(rows=sorted(rows, key=lambda r: (r["registered_at"], r["item_id"])))
         assert sql.strip().startswith("MERGE"), sql
         assert "BY SOURCE" not in sql, "the fake runs WHEN MATCHED and WHEN NOT MATCHED only"
         self.merges.append(sql)
@@ -165,6 +172,20 @@ class FakeBigQuery:
                 rows.append(value)
                 affected += 1
         return Done(affected=affected)
+
+    def registry_merge(self, sql, params):
+        """mark_deleted: one row keyed on item_id, deleted_at and the event set from the SQL."""
+        assert f"`{REGISTRY}` target" in sql and "ON target.item_id = source.item_id" in sql
+        self.merges.append(sql)
+        rows = self.tables.setdefault(REGISTRY, [])
+        event = re.search(r"last_event = '([^']+)'", sql).group(1)
+        match = next((r for r in rows if r["item_id"] == params["item_id"]), None)
+        if match:
+            match.update({"deleted_at": params["now"], "last_event": event, "last_event_at": params["now"]})
+        else:
+            rows.append({"item_id": params["item_id"], "source": "manual", "registered_at": params["now"],
+                         "deleted_at": params["now"], "last_event": event, "last_event_at": params["now"]})
+        return Done(affected=1)
 
     def load_table_from_json(self, rows, ref, job_config=None):
         if ref == LOG:
@@ -201,6 +222,16 @@ def env(monkeypatch):
 
         def items(self, *item_ids):
             monkeypatch.setattr(main, "ITEM_IDS", list(item_ids))
+
+        def register(self, *item_ids, deleted=False):
+            rows = self.tables.setdefault(REGISTRY, [])
+            for n, item_id in enumerate(item_ids):
+                rows.append({"item_id": item_id, "source": "webhook",
+                             "registered_at": f"2026-10-20 00:00:0{n}",
+                             "deleted_at": "2026-10-21 00:00:00" if deleted else None})
+
+        def registry(self):
+            return self.tables.get(REGISTRY, [])
 
         def run_at(self, when):
             ticks = []
