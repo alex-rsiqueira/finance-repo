@@ -89,3 +89,17 @@ def test_missing_configuration_fails_loudly(env, monkeypatch):
     monkeypatch.setattr(main, "EXPECTED_SECRET", "")
     with pytest.raises(RuntimeError, match="PLUGGY_WEBHOOK_SECRET"):
         env.call("item/created")
+
+
+def test_a_trailing_newline_on_either_side_of_the_secret_still_matches(env, monkeypatch):
+    """A secret stored from a pipe ends in a newline; Pluggy was given it stripped."""
+    env.api.add_item("item-1")
+    monkeypatch.setattr(main, "EXPECTED_SECRET", "the-secret")
+    assert env.call("item/created", secret="the-secret\n") == ("OK", 200)
+    assert len(env.registry()) == 1
+
+
+def test_the_secret_is_stripped_when_read_from_the_environment(monkeypatch):
+    import importlib
+    monkeypatch.setenv("PLUGGY_WEBHOOK_SECRET", "abc123\n")
+    assert importlib.reload(main).EXPECTED_SECRET == "abc123"

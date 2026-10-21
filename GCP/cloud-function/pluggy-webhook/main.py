@@ -27,7 +27,9 @@ import pluggy_api
 PROJECT_ID = os.environ.get("PROJECT_ID", "")
 DATASET = os.environ.get("DATASET", "raw")
 SECRET_HEADER = "X-Finance-Webhook-Key"
-EXPECTED_SECRET = os.environ.get("PLUGGY_WEBHOOK_SECRET", "")
+# Stripped: a secret created from a pipe carries a trailing newline, which the
+# registration sent to Pluggy without, and one character off is a 403.
+EXPECTED_SECRET = os.environ.get("PLUGGY_WEBHOOK_SECRET", "").strip()
 REGISTRY = "tb_pluggy_item_registry"
 LOG_TABLE = "tb_pluggy_ingestion_log"
 
@@ -35,8 +37,10 @@ LOG_TABLE = "tb_pluggy_ingestion_log"
 def main(request):
     if not PROJECT_ID or not EXPECTED_SECRET:
         raise RuntimeError("PROJECT_ID and PLUGGY_WEBHOOK_SECRET must be set")
-    if request.headers.get(SECRET_HEADER, "") != EXPECTED_SECRET:
-        log("WARNING", "Webhook call refused: wrong or missing secret header")
+    given = request.headers.get(SECRET_HEADER, "").strip()
+    if given != EXPECTED_SECRET:
+        log("WARNING", "Webhook call refused: wrong or missing secret header",
+            header_present=bool(given), given_length=len(given), expected_length=len(EXPECTED_SECRET))
         return ("Forbidden", 403)
 
     body = request.get_json(silent=True) or {}
