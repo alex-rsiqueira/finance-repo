@@ -1,8 +1,10 @@
 """Loads the Meu Pluggy connections (Brazilian banks through Open Finance) into the raw
 tb_pluggy_* tables.
 
-Runs once a day from Pub/Sub. For every item id in PLUGGY_ITEM_IDS it reads the item, its
-accounts, every transaction of each account (no date filter), the bills of each credit card,
+Runs once a day from Pub/Sub. For every item in raw.tb_pluggy_item_registry not marked
+deleted (plan pluggy-transactions §3.3: the registry is kept by the pluggy-webhook function
+from Pluggy's item events, since Meu Pluggy items cannot be listed), plus whatever
+PLUGGY_ITEM_IDS still names, it reads the item, its accounts, every transaction of each account (no date filter), the bills of each credit card,
 the investments and their transactions. Each table gets one temp table and one MERGE per item:
 
   tb_pluggy_items, tb_pluggy_accounts,     insert only, one snapshot per run (dtinsert)
@@ -11,7 +13,8 @@ the investments and their transactions. Each table gets one temp table and one M
   tb_pluggy_investment_transactions        dtinsert is the first run, last_seen_dtinsert the latest
 
 An item whose status is not UPDATED gets its snapshot row only: its data is not read, an error
-is logged and the run fails. An item whose consent ends within CONSENT_WARNING_DAYS, or that
+is logged and the run fails. An item Pluggy no longer knows (404) is marked deleted in the
+registry and logged; the run goes on and succeeds without it. An item whose consent ends within CONSENT_WARNING_DAYS, or that
 Meu Pluggy has not refreshed for more than STALE_AFTER (lastUpdatedAt), loads as usual and logs an
 error: a connection deleted in Meu Pluggy keeps answering with its last snapshot, so nothing else
 would fail while its figures freeze (plan pluggy-ingestion D-14). A failing item does not stop the others, but the run then raises, so
@@ -22,6 +25,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import requests
 from google.cloud import bigquery, secretmanager
 
 import pluggy_api
@@ -30,6 +34,7 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "")
 DATASET = os.environ.get("DATASET", "raw")
 ITEM_IDS = [i.strip() for i in os.environ.get("PLUGGY_ITEM_IDS", "").split(",") if i.strip()]
 LOG_TABLE = "tb_pluggy_ingestion_log"
+REGISTRY = "tb_pluggy_item_registry"
 CONSENT_WARNING_DAYS = 30
 STALE_AFTER = timedelta(hours=36)
 REAUTHORISE = "authorise again in Meu Pluggy"
@@ -77,8 +82,6 @@ TABLES = {
 def main(event, context):
     if not PROJECT_ID:
         raise RuntimeError("PROJECT_ID is not set")
-    if not ITEM_IDS:
-        raise RuntimeError("PLUGGY_ITEM_IDS is not set")
 
     bq = bigquery.Client(project=PROJECT_ID)
     started = datetime.now(timezone.utc)
@@ -87,6 +90,12 @@ def main(event, context):
     rows_written = {table: 0 for table in TABLES}
 
     try:
+        item_ids = registered_items(bq)
+        item_ids += [i for i in ITEM_IDS if i not in item_ids]
+        if not item_ids:
+            raise RuntimeError("No item to load: the registry is empty and PLUGGY_ITEM_IDS is not set")
+        log("INFO", "Items to load", items=item_ids)
+
         secrets = secretmanager.SecretManagerServiceClient()
         client_id, client_secret = (
             secrets.access_secret_version(
@@ -96,17 +105,29 @@ def main(event, context):
         )
         client = pluggy_api.Client(client_id, client_secret)
 
-        for item_id in ITEM_IDS:
+        gone = []
+        for item_id in item_ids:
             try:
                 for table, written in load_item(bq, client, item_id, dtinsert, started).items():
                     rows_written[table] += written
+            except requests.HTTPError as e:
+                if e.response is None or e.response.status_code != 404:
+                    failures.append(f"item {item_id}: {e}")
+                    log_event(bq, "item_error", "error",
+                              {"item_id": item_id, "error": str(e), "error_type": type(e).__name__})
+                    continue
+                # The connection was deleted in Meu Pluggy: mark it and carry on.
+                gone.append(item_id)
+                mark_deleted(bq, item_id, dtinsert)
+                log_event(bq, "item_gone", "success",
+                          {"item_id": item_id, "error": "Pluggy answers 404: marked deleted in the registry"})
             except Exception as e:
                 failures.append(f"item {item_id}: {e}")
                 log_event(bq, "item_error", "error",
                           {"item_id": item_id, "error": str(e), "error_type": type(e).__name__})
 
         log_event(bq, "ingestion_complete", "error" if failures else "success",
-                  {"dtinsert": dtinsert, "items": len(ITEM_IDS), "rows_written": rows_written,
+                  {"dtinsert": dtinsert, "items": item_ids, "gone": gone, "rows_written": rows_written,
                    "failures": failures})
     except Exception as e:
         log_event(bq, "fatal_error", "error", {"error": str(e), "error_type": type(e).__name__})
@@ -114,7 +135,31 @@ def main(event, context):
 
     if failures:
         raise RuntimeError("Pluggy ingestion finished with errors: " + "; ".join(failures))
-    return f"Pluggy ingestion complete: {len(ITEM_IDS)} items, rows written {rows_written}"
+    return f"Pluggy ingestion complete: {len(item_ids)} items, rows written {rows_written}"
+
+
+def registered_items(bq):
+    """The items of the registry not marked deleted, oldest registration first."""
+    rows = bq.query(f"""
+        SELECT item_id FROM `{PROJECT_ID}.{DATASET}.{REGISTRY}`
+        WHERE deleted_at IS NULL
+        ORDER BY registered_at, item_id
+    """).result()
+    return [row["item_id"] for row in rows]
+
+
+def mark_deleted(bq, item_id, dtinsert):
+    """A 404 from Pluggy: the row gets deleted_at (and exists, for an item the variable named)."""
+    bq.query(f"""
+        MERGE `{PROJECT_ID}.{DATASET}.{REGISTRY}` target
+        USING (SELECT @item_id AS item_id) source
+        ON target.item_id = source.item_id
+        WHEN MATCHED THEN UPDATE SET deleted_at = @now, last_event = 'load/404', last_event_at = @now
+        WHEN NOT MATCHED THEN INSERT (item_id, source, registered_at, deleted_at, last_event, last_event_at)
+        VALUES (@item_id, 'manual', @now, @now, 'load/404', @now)
+    """, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("item_id", "STRING", item_id),
+        bigquery.ScalarQueryParameter("now", "STRING", dtinsert)])).result()
 
 
 def load_item(bq, client, item_id, dtinsert, started):

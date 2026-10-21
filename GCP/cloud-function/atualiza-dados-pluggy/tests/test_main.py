@@ -284,10 +284,80 @@ def test_merge_sql_matches_each_table_on_its_key(env):
     assert all("PARSE_JSON(source.`payload`)" in m for m in env.merges)
 
 
-def test_no_item_ids_is_a_failed_run(env):
+def test_no_item_anywhere_is_a_failed_run(env):
     env.items()
-    with pytest.raises(RuntimeError, match="PLUGGY_ITEM_IDS is not set"):
+    with pytest.raises(RuntimeError, match="registry is empty and PLUGGY_ITEM_IDS is not set"):
         env.run()
+    assert env.log("fatal_error")
+
+
+# --- the item registry (plan pluggy-transactions §3.3) -----------------------------
+
+def test_registered_items_load_without_the_variable(env):
+    env.items()
+    env.api.add_item(ITEM_1)
+    env.api.add_account(ITEM_1, CHECKING, transactions=[[transaction("t1")]])
+    env.register(ITEM_1)
+    env.run()
+    assert [r["item_id"] for r in env.rows("tb_pluggy_items")] == [ITEM_1]
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+
+
+def test_an_item_in_the_registry_and_the_variable_loads_once(env):
+    one_item(env)
+    env.register(ITEM_1)
+    env.run()
+    assert len(env.calls_to(f"/items/{ITEM_1}")) == 1
+    assert len(env.rows("tb_pluggy_items")) == 1
+
+
+def test_registry_items_come_first_then_the_variables_own(env):
+    env.api.add_item(ITEM_1)
+    env.api.add_item(ITEM_2)
+    env.register(ITEM_2)
+    env.items(ITEM_1)
+    env.run()
+    assert [c[1] for c in env.api.calls if c[1].startswith("/items/")] == [f"/items/{ITEM_2}", f"/items/{ITEM_1}"]
+
+
+def test_a_registered_item_marked_deleted_is_not_read(env):
+    one_item(env)
+    env.api.add_item(ITEM_2)
+    env.register(ITEM_2, deleted=True)
+    env.run()
+    assert env.calls_to(f"/items/{ITEM_2}") == []
+
+
+def test_a_404_marks_the_item_deleted_and_the_run_succeeds(env):
+    one_item(env)
+    env.api.add_item(ITEM_2)
+    env.register(ITEM_2)
+    env.api.failures[f"/items/{ITEM_2}"] = [404]
+    env.run()
+    [gone] = [r for r in env.registry() if r["item_id"] == ITEM_2]
+    assert gone["deleted_at"] == "2026-10-11 07:15:00" and gone["last_event"] == "load/404"
+    assert [r["item_id"] for r in env.rows("tb_pluggy_items")] == [ITEM_1]
+    assert env.log("item_error") == [] and env.log("item_gone")[0]["end_point"] == ITEM_2
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+
+
+def test_a_404_on_an_item_the_variable_names_writes_a_deleted_registry_row(env):
+    one_item(env)
+    env.items(ITEM_1, ITEM_2)
+    env.api.failures[f"/items/{ITEM_2}"] = [404]
+    env.run()
+    [row] = env.registry()
+    assert (row["item_id"], row["source"], row["deleted_at"]) == (ITEM_2, "manual", "2026-10-11 07:15:00")
+
+
+def test_a_403_is_still_a_failure_not_a_deletion(env):
+    one_item(env)
+    env.api.add_item(ITEM_2)
+    env.register(ITEM_2)
+    env.api.failures[f"/items/{ITEM_2}"] = [403]
+    with pytest.raises(RuntimeError, match=ITEM_2):
+        env.run()
+    assert env.registry()[0]["deleted_at"] is None
 
 
 def test_a_failing_log_table_does_not_hide_the_result(env, monkeypatch):

@@ -22,11 +22,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Meu Pluggy items to load, comma-separated (plan pluggy-ingestion D-6), from
-  # the repository variable PLUGGY_ITEM_IDS (Settings > Secrets and variables >
-  # Actions > Variables). A new bank authorised in Meu Pluggy, or a connection
-  # deleted and made again there (a new item id, D-14), is a change to that
-  # variable and a re-run of this workflow (Run workflow), not a commit.
+  # Meu Pluggy items the function loads besides raw.tb_pluggy_item_registry
+  # (plan pluggy-transactions §3.3: a bank connected in Meu Pluggy reaches the
+  # registry through the pluggy-webhook function and loads the next day, with
+  # no change here). Comma-separated, from the repository variable
+  # PLUGGY_ITEM_IDS (Settings > Secrets and variables > Actions > Variables);
+  # kept as a fallback for an item the webhook did not see, and may be empty.
   PLUGGY_ITEM_IDS: ${{ vars.PLUGGY_ITEM_IDS }}
 
 jobs:
@@ -41,11 +42,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check the item ids are set
-        # An unset variable would deploy a function that loads nothing.
-        run: |
-          echo "items=$PLUGGY_ITEM_IDS"
-          test -n "$PLUGGY_ITEM_IDS"
+      - name: Show the item ids the variable still names
+        # May be empty: the registry carries the items (plan pluggy-transactions D-9).
+        run: echo "items=$PLUGGY_ITEM_IDS"
 
       - uses: google-github-actions/auth@v2
         with:

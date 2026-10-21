@@ -30,6 +30,7 @@ jobs:
           pip install
           -r GCP/cloud-function/atualiza-dados-nordigen/requirements.txt
           -r GCP/cloud-function/atualiza-dados-pluggy/requirements.txt
+          -r GCP/cloud-function/pluggy-webhook/requirements.txt
           "setuptools<81" pytest ruff
 
       - name: Lint (fatal problems only)
@@ -43,4 +44,8 @@ jobs:
 
       - name: Tests (Pluggy ingestion)
         working-directory: GCP/cloud-function/atualiza-dados-pluggy
+        run: python -m pytest -q tests
+
+      - name: Tests (Pluggy webhook)
+        working-directory: GCP/cloud-function/pluggy-webhook
         run: python -m pytest -q tests
