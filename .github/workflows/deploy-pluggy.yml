@@ -86,7 +86,9 @@ jobs:
           SERVICE="$(gcloud run services describe atualiza-dados-pluggy \
             --project finances-314506 --region us-central1 --format json)"
           THROTTLING="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/cpu-throttling"] // "unset"' <<< "$SERVICE")"
-          ITEMS="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_ITEM_IDS") | .value' <<< "$SERVICE")"
+          # An empty variable (every item now comes from the registry) is stored
+          # by Cloud Run as an env var with no value key: read it as "".
+          ITEMS="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_ITEM_IDS") | .value // ""' <<< "$SERVICE")"
           SIGNATURE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FUNCTION_SIGNATURE_TYPE") | .value' <<< "$SERVICE")"
           echo "ready=$READY latest=$LATEST memory=$MEMORY concurrency=$CONCURRENCY cpu-throttling=$THROTTLING items=$ITEMS signature=$SIGNATURE"
           test "$READY" = "$LATEST"
