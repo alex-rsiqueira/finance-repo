@@ -103,3 +103,108 @@ def test_the_secret_is_stripped_when_read_from_the_environment(monkeypatch):
     import importlib
     monkeypatch.setenv("PLUGGY_WEBHOOK_SECRET", "abc123\n")
     assert importlib.reload(main).EXPECTED_SECRET == "abc123"
+
+
+TOPIC = "projects/test-project/topics/the-topic"
+
+
+def test_item_created_and_synced_asks_the_load_to_read_it(env):
+    env.api.add_item("item-1")
+    assert env.call("item/created") == ("OK", 200)
+    assert env.published == [(TOPIC, {"item_ids": ["item-1"], "event_id": "evt-1"})]
+    assert [r["end_point"] for r in env.log("load_requested")] == ["item-1"]
+
+
+def test_a_new_item_is_in_the_registry_before_the_load_is_asked_to_read_it(env):
+    """The load skips an item the registry does not hold."""
+    import conftest
+    env.api.add_item("item-1")
+    env.call("item/created")
+    assert conftest.FakePublisher.registered_when_published == [["item-1"]]
+
+
+def test_item_created_still_syncing_is_registered_and_not_loaded(env):
+    """Its item/updated, when the sync ends, asks for the read."""
+    env.api.add_item("item-1", status="UPDATING", execution="LOGIN_IN_PROGRESS")
+    assert env.call("item/created") == ("OK", 200)
+    assert len(env.registry()) == 1
+    assert env.published == [] and env.log("load_requested") == []
+
+
+def test_item_created_that_pluggy_does_not_answer_asks_for_nothing(env):
+    env.call("item/created", item_id="ghost")
+    assert env.published == []
+
+
+def test_item_updated_with_a_successful_sync_notes_the_event_and_asks_the_load_to_read_it(env):
+    env.api.add_item("item-1")
+    env.call("item/created")
+    env.call("item/updated", eventId="evt-2")
+    [row] = env.registry()
+    assert row["last_event"] == "item/updated"
+    assert env.published[-1] == (TOPIC, {"item_ids": ["item-1"], "event_id": "evt-2"})
+    assert len(env.published) == 2
+
+
+def test_item_updated_is_judged_from_the_item_read_back_never_from_the_payload(env):
+    env.api.add_item("item-1")
+    env.call("item/created")
+    env.api.add_item("item-1", execution="ERROR")
+    env.call("item/updated", executionStatus="SUCCESS", status="UPDATED")
+    assert len(env.published) == 1
+    assert [c[1] for c in env.api.calls].count("/items/item-1") == 2
+
+
+@pytest.mark.parametrize("status, execution", [
+    ("UPDATED", "PARTIAL_SUCCESS"),
+    ("UPDATED", "ERROR"),
+    ("LOGIN_ERROR", "SUCCESS"),
+    ("OUTDATED", "SUCCESS"),
+])
+def test_item_updated_whose_item_has_not_synced_cleanly_asks_for_nothing(env, status, execution):
+    env.api.add_item("item-1")
+    env.call("item/created")
+    env.api.add_item("item-1", status=status, execution=execution)
+    env.call("item/updated")
+    assert len(env.published) == 1
+    assert env.registry()[0]["last_event"] == "item/updated"
+
+
+def test_item_updated_for_an_item_the_registry_does_not_hold_reads_nothing_and_asks_for_nothing(env):
+    """Meu Pluggy's own item behind a bank (no accounts of its own) sends item/updated; the
+    load would skip it as unregistered, so it is not asked for."""
+    env.api.add_item("wrapper")
+    assert env.call("item/updated", item_id="wrapper") == ("OK", 200)
+    assert env.api.calls == [] and env.published == [] and env.registry() == []
+
+
+@pytest.mark.parametrize("event", ["item/error", "item/waiting_user_input", "item/login_succeeded"])
+def test_other_events_ask_for_nothing_and_read_nothing(env, event):
+    env.api.add_item("item-1")
+    env.call("item/created")
+    env.call(event)
+    assert len(env.published) == 1
+    assert [c[1] for c in env.api.calls] == ["/auth", "/items/item-1"]
+
+
+def test_item_deleted_asks_for_nothing(env):
+    env.api.add_item("item-1")
+    env.call("item/deleted")
+    assert env.published == []
+
+
+def test_a_failed_publish_is_answered_200_logged_and_the_item_stays_registered(env):
+    import conftest
+    env.api.add_item("item-1")
+    conftest.FakePublisher.failure = TimeoutError("deadline exceeded")
+    assert env.call("item/created") == ("OK", 200)
+    [error] = env.log("publish_error")
+    assert error["type"] == "Error" and error["end_point"] == "item-1" and "deadline" in error["message"]
+    assert env.log("load_requested") == [] and env.log("webhook_error") == []
+    assert len(env.registry()) == 1 and len(env.log("item_registered")) == 1
+
+
+def test_a_missing_load_topic_fails_loudly(env, monkeypatch):
+    monkeypatch.setattr(main, "LOAD_TOPIC", "")
+    with pytest.raises(RuntimeError, match="LOAD_TOPIC"):
+        env.call("item/created")

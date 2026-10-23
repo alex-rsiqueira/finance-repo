@@ -9,6 +9,7 @@ import requests
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ.setdefault("PROJECT_ID", "test-project")
 os.environ.setdefault("PLUGGY_WEBHOOK_SECRET", "the-secret")
+os.environ.setdefault("LOAD_TOPIC", "the-topic")
 
 import main  # noqa: E402
 import pluggy_api  # noqa: E402
@@ -30,9 +31,9 @@ class FakeApi:
     def __init__(self):
         self.items, self.calls = {}, []
 
-    def add_item(self, item_id, connector="Nubank", status="UPDATED"):
+    def add_item(self, item_id, connector="Nubank", status="UPDATED", execution="SUCCESS"):
         self.items[item_id] = {"id": item_id, "connector": {"id": 612, "name": connector},
-                               "status": status, "executionStatus": "SUCCESS",
+                               "status": status, "executionStatus": execution,
                                "lastUpdatedAt": "2026-10-21T22:20:55.936Z"}
 
     def request(self, method, url, params=None, json=None, headers=None):
@@ -63,6 +64,27 @@ class FakeSecrets:
         secret = re.search(r"secrets/(.+)/versions/latest", name).group(1)
         value = {"Pluggy_client_id": "the-client-id", "Pluggy_client_secret": "the-client-secret"}[secret]
         return type("S", (), {"payload": type("P", (), {"data": value.encode()})()})()
+
+
+class FakePublisher:
+    """Pub/Sub: every message published, as (topic, decoded JSON), and the registry's item ids
+    at that moment. failure, when set, is raised by the future's result(), as a publish that
+    does not go through."""
+
+    messages = []
+    registered_when_published = []
+    failure = None
+
+    def publish(self, topic, data):
+        FakePublisher.messages.append((topic, json.loads(data.decode())))
+        FakePublisher.registered_when_published.append(
+            [r["item_id"] for r in FakeBigQuery.tables.get(REGISTRY, [])])
+        return self
+
+    def result(self, timeout=None):
+        assert timeout == main.PUBLISH_TIMEOUT
+        if FakePublisher.failure:
+            raise FakePublisher.failure
 
 
 class Done:
@@ -146,10 +168,13 @@ class FakeRequest:
 @pytest.fixture
 def env(monkeypatch):
     FakeBigQuery.tables, FakeBigQuery.queries = {}, []
+    FakePublisher.messages, FakePublisher.registered_when_published, FakePublisher.failure = [], [], None
     api = FakeApi()
     FakeSession.api = api
     monkeypatch.setattr(main, "PROJECT_ID", "test-project")
     monkeypatch.setattr(main, "EXPECTED_SECRET", "the-secret")
+    monkeypatch.setattr(main, "LOAD_TOPIC", "the-topic")
+    monkeypatch.setattr(main.pubsub_v1, "PublisherClient", FakePublisher)
     monkeypatch.setattr(main.bigquery, "Client", FakeBigQuery)
     monkeypatch.setattr(main.secretmanager, "SecretManagerServiceClient", FakeSecrets)
     monkeypatch.setattr(pluggy_api.requests, "Session", FakeSession)
@@ -158,6 +183,7 @@ def env(monkeypatch):
     class Env:
         def __init__(self):
             self.api, self.tables, self.queries = api, FakeBigQuery.tables, FakeBigQuery.queries
+            self.published = FakePublisher.messages
 
         def call(self, event, item_id="item-1", secret="the-secret", **more):
             body = {"event": event, "eventId": "evt-1", "itemId": item_id, "triggeredBy": "USER", **more}
