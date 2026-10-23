@@ -1,9 +1,10 @@
+import json
 from datetime import datetime, timezone
 
 import pytest
 import requests
 
-from conftest import ITEM_1, ITEM_2, bill, investment_transaction, transaction
+from conftest import ITEM_1, ITEM_2, LOG, bill, investment_transaction, transaction
 
 CHECKING = "acc-checking"
 CARD = "acc-card"
@@ -374,3 +375,157 @@ def test_a_failing_log_table_does_not_hide_the_result(env, monkeypatch):
     monkeypatch.setattr(conftest.FakeBigQuery, "load_table_from_json", refuse_log)
     assert "1 items" in env.run()
     assert len(env.rows("tb_pluggy_transactions")) == 1
+
+
+def two_registered_items(env):
+    env.items()
+    env.register(ITEM_1, ITEM_2)
+    for item_id, account_id in ((ITEM_1, "acc-1"), (ITEM_2, "acc-2")):
+        env.api.add_item(item_id)
+        env.api.add_account(item_id, account_id, transactions=[[transaction(f"t-{item_id}")]])
+
+
+def items_read(env):
+    return [path.split("/")[-1] for _, path, _ in env.api.calls if path.startswith("/items/")]
+
+
+def complete(env):
+    return [json.loads(r["description"]) for r in env.log("ingestion_complete")]
+
+
+def test_a_message_naming_items_loads_those_and_nothing_else(env):
+    two_registered_items(env)
+    env.deliver({"item_ids": [ITEM_2], "event_id": "evt-1"})
+    assert items_read(env) == [ITEM_2]
+    assert {r["item_id"] for r in env.rows("tb_pluggy_items")} == {ITEM_2}
+    assert {r["account_id"] for r in env.rows("tb_pluggy_transactions")} == {"acc-2"}
+    [run] = complete(env)
+    assert run["items"] == [ITEM_2] and run["requested"] == [ITEM_2] and run["message_id"] == "msg-1"
+
+
+def test_an_item_named_twice_in_a_message_loads_once(env):
+    two_registered_items(env)
+    env.deliver({"item_ids": [ITEM_1, ITEM_1]})
+    assert items_read(env) == [ITEM_1]
+
+
+@pytest.mark.parametrize("data", [
+    None,                       # no body
+    "{}",                       # an empty JSON object
+    "run",                      # a body that is not JSON
+    '{"item_ids": []}',         # an empty list
+    '{"item_ids": "item-1"}',   # not a list
+    "[1, 2]",                   # JSON, not an object
+])
+def test_a_message_naming_no_items_loads_every_item_as_the_0815_run(env, data):
+    two_registered_items(env)
+    env.items("item-3")
+    env.api.add_item("item-3")
+    env.deliver(data=data)
+    assert items_read(env) == [ITEM_1, ITEM_2, "item-3"]
+    [run] = complete(env)
+    assert run["requested"] is None
+
+
+def test_a_listed_item_the_registry_marks_deleted_is_skipped_and_logged(env):
+    two_registered_items(env)
+    env.registry()[0]["deleted_at"] = "2026-10-22 10:00:00"
+    env.deliver({"item_ids": [ITEM_1, ITEM_2]})
+    assert items_read(env) == [ITEM_2]
+    [skipped] = env.log("item_skipped")
+    assert skipped["end_point"] == ITEM_1 and skipped["type"] == "Info"
+    assert complete(env)[0]["skipped"] == [ITEM_1]
+
+
+def test_a_listed_item_the_registry_does_not_hold_is_skipped_even_if_the_variable_names_it(env):
+    two_registered_items(env)
+    env.items("ghost")
+    env.api.add_item("ghost")
+    assert "Pluggy ingestion complete" in env.deliver({"item_ids": ["ghost"]})
+    assert items_read(env) == []
+    assert [r["end_point"] for r in env.log("item_skipped")] == ["ghost"]
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+
+
+def test_a_redelivered_message_already_loaded_reads_nothing(env):
+    """2026-10-22: Pub/Sub redelivered the 08:15 message while its run was still going and
+    --concurrency 1 queued it; both ran."""
+    two_registered_items(env)
+    env.deliver()
+    calls, merges = len(env.api.calls), len(env.merges)
+    result = env.deliver()
+    assert "skipped" in result
+    assert len(env.api.calls) == calls and len(env.merges) == merges
+    assert len(env.log("ingestion_complete")) == 1
+    [skipped] = env.log("redelivery_skipped")
+    assert json.loads(skipped["description"])["message_id"] == "msg-1"
+
+
+def test_another_message_for_the_same_items_still_runs(env):
+    """The guard is per message, not per day or per item."""
+    two_registered_items(env)
+    env.deliver({"item_ids": [ITEM_1]}, message_id="msg-1")
+    env.deliver({"item_ids": [ITEM_1]}, message_id="msg-2")
+    assert items_read(env) == [ITEM_1, ITEM_1]
+    assert [r["message_id"] for r in complete(env)] == ["msg-1", "msg-2"]
+    assert env.log("redelivery_skipped") == []
+
+
+def test_a_failed_run_is_retried_once_and_not_again(env):
+    two_registered_items(env)
+    env.api.add_item(ITEM_1, status="LOGIN_ERROR")
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="status LOGIN_ERROR"):
+            env.deliver()
+    assert items_read(env) == [ITEM_1, ITEM_2, ITEM_1, ITEM_2]
+    assert "skipped" in env.deliver()
+    assert len(items_read(env)) == 4
+    assert [r["type"] for r in env.log("ingestion_complete")] == ["Error", "Error"]
+    assert len(env.log("redelivery_skipped")) == 1
+
+
+def test_a_retry_that_succeeds_stops_the_redeliveries(env):
+    two_registered_items(env)
+    env.api.failures["/auth"] = [401]
+    with pytest.raises(requests.HTTPError):
+        env.deliver()
+    env.deliver()
+    assert "skipped" in env.deliver()
+    assert [r["type"] for r in env.log("ingestion_complete")] == ["Info"]
+
+
+def test_a_fatal_error_counts_as_a_failed_run(env):
+    two_registered_items(env)
+    env.api.failures["/auth"] = [401, 401]
+    for _ in range(2):
+        with pytest.raises(requests.HTTPError):
+            env.deliver()
+    assert "skipped" in env.deliver()
+    assert len(env.calls_to("/auth")) == 2
+    assert [json.loads(r["description"])["message_id"] for r in env.log("fatal_error")] == ["msg-1", "msg-1"]
+
+
+def test_the_message_id_leads_the_description_so_a_cut_one_still_matches(env):
+    """The log keeps 5000 characters of the description; the message id comes first."""
+    two_registered_items(env)
+    env.deliver()
+    assert env.log("ingestion_complete")[0]["description"].startswith('{"message_id": "msg-1", ')
+    env.tables[LOG].append({"error_code": "ingestion_complete", "type": "Info",
+                            "description": '{"message_id": "msg-2", "dtinsert": "2026-10-22 21:25:00", "ite'})
+    calls = len(env.api.calls)
+    assert "skipped" in env.deliver(message_id="msg-2")
+    assert len(env.api.calls) == calls
+
+
+def test_a_message_id_that_only_starts_like_another_does_not_match(env):
+    two_registered_items(env)
+    env.deliver(message_id="12345")
+    env.deliver(message_id="1234")
+    assert len(env.log("ingestion_complete")) == 2
+
+
+def test_a_run_without_a_message_id_is_not_guarded(env):
+    two_registered_items(env)
+    env.run()
+    env.run()
+    assert len(env.log("ingestion_complete")) == 2 and env.log("redelivery_skipped") == []

@@ -11,6 +11,12 @@ name: Deploy Pluggy webhook
 # given to Pluggy once, when the webhook is registered (POST /webhooks with
 # headers {"X-Finance-Webhook-Key": ...}); the runtime account needs
 # roles/secretmanager.secretAccessor on that secret.
+#
+# When Pluggy has synced an item, the function publishes it to LOAD_TOPIC, the
+# topic that triggers atualiza-dados-pluggy (plan pluggy-transactions §3.4), so
+# the runtime account also needs roles/pubsub.publisher on that topic. Granted
+# once by hand, not here, so the deploy account needs no right over the
+# topic's IAM policy.
 
 on:
   push:
@@ -49,10 +55,10 @@ jobs:
 
       - name: Deploy pluggy-webhook
         # An HTTP function (main(request); no FUNCTION_SIGNATURE_TYPE). Public,
-        # so Pluggy can reach it; the secret header is the gate. Small and
-        # rare: a few calls a year, each answered within Pluggy's 10 s, so two
-        # instances and the default concurrency are plenty. DATASET is not set,
-        # so it writes to raw.
+        # so Pluggy can reach it; the secret header is the gate. Small: a few
+        # calls a day (one item/updated per item sync), each answered within
+        # Pluggy's 10 s, so two instances and the default concurrency are
+        # plenty. DATASET is not set, so it writes to raw.
         run: |
           gcloud run deploy pluggy-webhook \
             --source GCP/cloud-function/pluggy-webhook \
@@ -63,7 +69,7 @@ jobs:
             --service-account 16973409618-compute@developer.gserviceaccount.com \
             --memory 256Mi --cpu 1 --max-instances 2 --timeout 30 \
             --allow-unauthenticated \
-            --update-env-vars "PROJECT_ID=finances-314506" \
+            --update-env-vars "PROJECT_ID=finances-314506,LOAD_TOPIC=atualiza-dados-pluggy" \
             --update-secrets "PLUGGY_WEBHOOK_SECRET=Pluggy_webhook_secret:latest"
 
       - name: Check the new revision is serving
@@ -74,8 +80,10 @@ jobs:
           SERVICE="$(gcloud run services describe pluggy-webhook \
             --project finances-314506 --region us-central1 --format json)"
           SECRET="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_WEBHOOK_SECRET") | .valueFrom.secretKeyRef.name' <<< "$SERVICE")"
-          echo "ready=$READY latest=$LATEST url=$URL secret=$SECRET"
+          TOPIC="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "LOAD_TOPIC") | .value // ""' <<< "$SERVICE")"
+          echo "ready=$READY latest=$LATEST url=$URL secret=$SECRET topic=$TOPIC"
           test "$READY" = "$LATEST"
           test "$SECRET" = "Pluggy_webhook_secret"
+          test "$TOPIC" = "atualiza-dados-pluggy"
           # A call without the header is refused, never retried by Pluggy.
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' -d '{}')" = "403"
