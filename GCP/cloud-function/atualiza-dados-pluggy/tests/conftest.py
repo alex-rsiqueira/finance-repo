@@ -1,8 +1,10 @@
+import base64
 import json
 import os
 import re
 import sys
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -144,7 +146,10 @@ class FakeBigQuery:
 
     def query(self, sql, job_config=None):
         if job_config is not None and job_config.query_parameters:
-            return self.registry_merge(sql, {p.name: p.value for p in job_config.query_parameters})
+            params = {p.name: p.value for p in job_config.query_parameters}
+            if sql.strip().startswith("SELECT"):
+                return self.previous_runs(sql, params)
+            return self.registry_merge(sql, params)
         if sql.strip().startswith("SELECT"):
             assert f"`{REGISTRY}`" in sql and "deleted_at IS NULL" in sql, sql
             rows = [r for r in self.tables.get(REGISTRY, []) if r.get("deleted_at") is None]
@@ -172,6 +177,15 @@ class FakeBigQuery:
                 rows.append(value)
                 affected += 1
         return Done(affected=affected)
+
+    def previous_runs(self, sql, params):
+        """The redelivery lookup: the runs of one message, read from the log rows whose
+        description contains the needle, as the SQL's STRPOS does."""
+        assert f"`{LOG}`" in sql and "error_code IN ('ingestion_complete', 'fatal_error')" in sql, sql
+        assert "STRPOS(description, @needle) > 0" in sql and "COUNTIF(type = 'Info') AS succeeded" in sql, sql
+        runs = [r for r in self.tables.get(LOG, [])
+                if r["error_code"] in ("ingestion_complete", "fatal_error") and params["needle"] in r["description"]]
+        return Done(rows=[{"succeeded": sum(r["type"] == "Info" for r in runs), "runs": len(runs)}])
 
     def registry_merge(self, sql, params):
         """mark_deleted: one row keyed on item_id, deleted_at and the event set from the SQL."""
@@ -233,7 +247,7 @@ def env(monkeypatch):
         def registry(self):
             return self.tables.get(REGISTRY, [])
 
-        def run_at(self, when):
+        def run_at(self, when, event=None, context=None):
             ticks = []
 
             class Clock(datetime):
@@ -243,10 +257,23 @@ def env(monkeypatch):
                     ticks.append(None)
                     return when + timedelta(seconds=len(ticks) - 1)
             monkeypatch.setattr(main, "datetime", Clock)
-            return main.main({}, None)
+            return main.main(event or {}, context)
 
         def run(self):
             return self.run_at(datetime(2026, 10, 11, 7, 15, 0, tzinfo=timezone.utc))
+
+        def deliver(self, message=None, message_id="msg-1", data=None):
+            """A Pub/Sub delivery as the Functions Framework hands it to an event function:
+            the message body base64 in event["data"], its message id as context.event_id.
+            message is JSON-encoded; data is the raw body, for one that is not JSON."""
+            if message is not None:
+                data = json.dumps(message)
+            event = {"@type": "type.googleapis.com/google.pubsub.v1.PubsubMessage", "attributes": None}
+            if data is not None:
+                event["data"] = base64.b64encode(data.encode()).decode()
+            context = SimpleNamespace(event_id=message_id, timestamp="2026-10-22T21:24:40.000Z",
+                                      event_type="google.pubsub.topic.publish", resource=None)
+            return self.run_at(datetime(2026, 10, 22, 21, 25, 0, tzinfo=timezone.utc), event, context)
 
         def rows(self, table):
             return self.tables.get(f"test-project.raw.{table}", [])
