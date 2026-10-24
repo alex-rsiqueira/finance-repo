@@ -60,7 +60,8 @@ jobs:
         # the default concurrency are plenty. DATASET is not set, so it writes
         # to raw. CPU stays allocated outside requests: item/updated is
         # answered at once, within Pluggy's 10 s, and its work runs after the
-        # answer, which a throttled CPU would starve.
+        # answer, which a throttled CPU would starve. Cloud Run requires at
+        # least 512 MiB with CPU always allocated.
         run: |
           gcloud run deploy pluggy-webhook \
             --source GCP/cloud-function/pluggy-webhook \
@@ -69,25 +70,26 @@ jobs:
             --project finances-314506 \
             --region us-central1 \
             --service-account 16973409618-compute@developer.gserviceaccount.com \
-            --memory 256Mi --cpu 1 --no-cpu-throttling --max-instances 2 --timeout 30 \
+            --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 2 --timeout 30 \
             --allow-unauthenticated \
             --update-env-vars "PROJECT_ID=finances-314506,LOAD_TOPIC=atualiza-dados-pluggy" \
             --update-secrets "PLUGGY_WEBHOOK_SECRET=Pluggy_webhook_secret:latest"
 
       - name: Check the new revision is serving
         run: |
-          read -r READY LATEST URL <<< "$(gcloud run services describe pluggy-webhook \
+          read -r READY LATEST URL MEMORY <<< "$(gcloud run services describe pluggy-webhook \
             --project finances-314506 --region us-central1 \
-            --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,status.url)')"
+            --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,status.url,spec.template.spec.containers[0].resources.limits.memory)')"
           SERVICE="$(gcloud run services describe pluggy-webhook \
             --project finances-314506 --region us-central1 --format json)"
           SECRET="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_WEBHOOK_SECRET") | .valueFrom.secretKeyRef.name' <<< "$SERVICE")"
           TOPIC="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "LOAD_TOPIC") | .value // ""' <<< "$SERVICE")"
           THROTTLING="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/cpu-throttling"] // "unset"' <<< "$SERVICE")"
-          echo "ready=$READY latest=$LATEST url=$URL secret=$SECRET topic=$TOPIC cpu-throttling=$THROTTLING"
+          echo "ready=$READY latest=$LATEST url=$URL memory=$MEMORY secret=$SECRET topic=$TOPIC cpu-throttling=$THROTTLING"
           test "$READY" = "$LATEST"
           test "$SECRET" = "Pluggy_webhook_secret"
           test "$TOPIC" = "atualiza-dados-pluggy"
+          test "$MEMORY" = "512Mi"
           test "$THROTTLING" = "false"
           # A call without the header is refused, never retried by Pluggy.
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST "$URL" -H 'Content-Type: application/json' -d '{}')" = "403"
