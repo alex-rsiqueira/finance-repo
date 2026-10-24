@@ -32,6 +32,11 @@ Meu Pluggy has not refreshed for more than STALE_AFTER (lastUpdatedAt), loads as
 error: a connection deleted in Meu Pluggy keeps answering with its last snapshot, so nothing else
 would fail while its figures freeze (plan pluggy-ingestion D-14). A failing item does not stop the others, but the run then raises, so
 the execution is reported as failed. Every row of a run carries the same dtinsert.
+
+A run that wrote rows - even beside an item that failed - then starts a Dataform run of the bank
+tag from release-02's compilation, so the tables the Bank tab reads take them in within minutes
+(finance-backend plans/bank-reads-from-tables.md §3.2). It is logged as dataform_run_started, or
+dataform_run_error when it cannot start; neither changes the load's outcome.
 """
 import base64
 import json
@@ -39,7 +44,9 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import google.auth
 import requests
+from google.auth.transport.requests import AuthorizedSession
 from google.cloud import bigquery, secretmanager
 
 import pluggy_api
@@ -53,6 +60,12 @@ CONSENT_WARNING_DAYS = 30
 STALE_AFTER = timedelta(hours=36)
 REAUTHORISE = "authorise again in Meu Pluggy"
 MAX_RUNS = 2  # per Pub/Sub message: a failed run gets one retry
+
+# The Dataform run after a load (finance-backend plans/bank-reads-from-tables.md §3.2).
+DATAFORM_API = "https://dataform.googleapis.com/v1"
+DATAFORM_LOCATION = "us-central1"
+DATAFORM_REPOSITORY = "dataform-repo"
+DATAFORM_RELEASE = os.environ.get("DATAFORM_RELEASE", "release-02")
 
 # raw table: (parent id column, record id column, {column: field in the record}, snapshot)
 TABLES = {
@@ -172,6 +185,9 @@ def main(event, context):
                   {"message_id": message_id, "dtinsert": dtinsert, "items": item_ids,
                    "requested": requested or None, "skipped": skipped, "gone": gone,
                    "rows_written": rows_written, "failures": failures})
+        # Whatever was written reaches the Bank tab, even when another item failed.
+        if sum(rows_written.values()):
+            start_bank_run(bq, {"message_id": message_id, "dtinsert": dtinsert})
     except Exception as e:
         log_event(bq, "fatal_error", "error",
                   {"message_id": message_id, "error": str(e), "error_type": type(e).__name__})
@@ -180,6 +196,34 @@ def main(event, context):
     if failures:
         raise RuntimeError("Pluggy ingestion finished with errors: " + "; ".join(failures))
     return f"Pluggy ingestion complete: {len(item_ids)} items, rows written {rows_written}"
+
+
+def start_bank_run(bq, details):
+    """Start a Dataform run of the bank tag, so the tables the Bank tab reads take in what was just
+    loaded (finance-backend plans/bank-reads-from-tables.md D-1): from the release config's latest
+    compilation (D-6), whether or not another run is going (D-5). Never raises: the load is done
+    either way, and the daily run rebuilds the tables too."""
+    repository = f"projects/{PROJECT_ID}/locations/{DATAFORM_LOCATION}/repositories/{DATAFORM_REPOSITORY}"
+    try:
+        session = dataform_session()
+        release = session.get(f"{DATAFORM_API}/{repository}/releaseConfigs/{DATAFORM_RELEASE}", timeout=30)
+        release.raise_for_status()
+        compilation = release.json().get("releaseCompilationResult")
+        if not compilation:
+            raise RuntimeError(f"{DATAFORM_RELEASE} has no compilation result")
+        run = session.post(f"{DATAFORM_API}/{repository}/workflowInvocations", timeout=30, json={
+            "compilationResult": compilation, "invocationConfig": {"includedTags": ["bank"]}})
+        run.raise_for_status()
+        log_event(bq, "dataform_run_started", "success",
+                  {**details, "invocation": run.json().get("name"), "compilation": compilation})
+    except Exception as e:
+        log_event(bq, "dataform_run_error", "error", {**details, "error": str(e), "error_type": type(e).__name__})
+
+
+def dataform_session():
+    """An HTTP session authorised as the function's runtime account."""
+    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    return AuthorizedSession(credentials)
 
 
 def registered_items(bq):

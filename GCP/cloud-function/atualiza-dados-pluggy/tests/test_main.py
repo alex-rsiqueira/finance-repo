@@ -529,3 +529,95 @@ def test_a_run_without_a_message_id_is_not_guarded(env):
     env.run()
     env.run()
     assert len(env.log("ingestion_complete")) == 2 and env.log("redelivery_skipped") == []
+
+
+# --- the bank run after a load (finance-backend plans/bank-reads-from-tables.md §3.2) ------
+
+BANK_RUN = {"compilationResult": "projects/test-project/locations/us-central1/repositories/dataform-repo/"
+                                 "compilationResults/c-1", "invocationConfig": {"includedTags": ["bank"]}}
+
+
+def test_a_load_that_wrote_rows_starts_one_bank_run_from_the_release(env):
+    two_registered_items(env)
+    env.deliver({"item_ids": [ITEM_2]})
+    assert env.dataform.runs == [BANK_RUN]
+    [started] = env.log("dataform_run_started")
+    details = json.loads(started["description"])
+    assert started["type"] == "Info" and details["message_id"] == "msg-1"
+    assert details["invocation"].endswith("/repositories/dataform-repo/workflowInvocations/run-1")
+    assert details["compilation"] == BANK_RUN["compilationResult"]
+
+
+def test_a_run_is_started_after_the_load_is_logged(env):
+    """The ingestion log says the load is done before anything reads it."""
+    two_registered_items(env)
+    env.deliver()
+    assert [r["error_code"] for r in env.log()][-2:] == ["ingestion_complete", "dataform_run_started"]
+
+
+def test_every_load_starts_its_own_run_even_while_one_may_be_going(env):
+    """D-5: two syncs a minute apart (2026-10-23 18:33 and 18:34) start two runs."""
+    two_registered_items(env)
+    env.deliver({"item_ids": [ITEM_1]}, message_id="msg-1")
+    env.deliver({"item_ids": [ITEM_2]}, message_id="msg-2")
+    assert env.dataform.runs == [BANK_RUN, BANK_RUN]
+
+
+def test_a_load_that_read_no_item_starts_no_run(env):
+    two_registered_items(env)
+    env.deliver({"item_ids": ["ghost"]})
+    assert env.dataform.runs == [] and env.log("dataform_run_started") == []
+
+
+def test_a_redelivered_message_starts_no_second_run(env):
+    two_registered_items(env)
+    env.deliver()
+    env.deliver()
+    assert env.dataform.runs == [BANK_RUN]
+
+
+def test_a_run_that_failed_before_loading_starts_none(env):
+    env.items()
+    with pytest.raises(RuntimeError):
+        env.run()
+    assert env.dataform.runs == []
+
+
+def test_an_item_that_failed_beside_one_that_loaded_still_starts_the_run(env):
+    """What did load reaches the Bank tab (decided 2026-10-24); the run is still reported failed."""
+    env.items(ITEM_1, ITEM_2)
+    env.api.add_item(ITEM_1, status="LOGIN_ERROR")
+    env.api.add_item(ITEM_2)
+    env.api.add_account(ITEM_2, CHECKING, transactions=[[transaction("t1")]])
+    with pytest.raises(RuntimeError, match="item item-1"):
+        env.run()
+    assert env.dataform.runs == [BANK_RUN]
+
+
+@pytest.mark.parametrize("failure", [403, 404, requests.ConnectionError("dataform unreachable")])
+def test_a_run_that_cannot_start_is_logged_and_the_load_still_succeeds(env, failure):
+    two_registered_items(env)
+    env.dataform.failure = failure
+    assert "Pluggy ingestion complete" in env.deliver()
+    assert env.dataform.runs == [] and env.log("dataform_run_started") == []
+    [error] = env.log("dataform_run_error")
+    assert error["type"] == "Error" and json.loads(error["description"])["message_id"] == "msg-1"
+    assert complete(env)[0]["failures"] == []
+    if isinstance(failure, int):
+        assert str(failure) in error["message"], "the answer's status is what is logged"
+
+
+def test_an_invocation_the_api_refuses_is_logged_and_the_load_still_succeeds(env):
+    two_registered_items(env)
+    env.dataform.run_failure = 403
+    assert "Pluggy ingestion complete" in env.deliver()
+    assert env.log("dataform_run_started") == []
+    assert "403" in env.log("dataform_run_error")[0]["message"]
+
+
+def test_a_release_with_no_compilation_is_logged_and_starts_nothing(env):
+    two_registered_items(env)
+    env.dataform.compilation = None
+    env.deliver()
+    assert env.dataform.runs == []
+    assert "release-02 has no compilation result" in env.log("dataform_run_error")[0]["message"]
