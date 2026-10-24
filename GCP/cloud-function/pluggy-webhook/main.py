@@ -22,10 +22,16 @@ An item still syncing, or whose sync failed, is left to its next item/updated or
 A call without the shared secret header is refused with 403, which Pluggy never retries.
 Anything that goes wrong after the header check is logged and answered 200: Pluggy retries
 a failed delivery three times and nothing here needs it, since every write is idempotent.
-The answer must come within 10 s.
+
+The answer must come within 10 s, or Pluggy sends the event again. item/updated is answered
+at once and its work runs after the answer, in a thread: the service keeps CPU after the
+answer (--no-cpu-throttling). Its work lost to an instance stopped meanwhile is the 08:15
+run's to read. item/created does its work before answering, so a late answer is retried by
+Pluggy and a new item is never left unregistered; the other events only write one row.
 """
 import json
 import os
+import threading
 from datetime import datetime, timezone
 
 from google.cloud import bigquery, pubsub_v1, secretmanager
@@ -61,6 +67,15 @@ def main(request):
     if not event or not item_id:
         return ("Ignored", 200)
 
+    if event == "item/updated":
+        threading.Thread(target=handle, args=(event, item_id, body.get("eventId"))).start()
+    else:
+        handle(event, item_id, body.get("eventId"))
+    return ("OK", 200)
+
+
+def handle(event, item_id, event_id):
+    """The event's work. A failure in it is logged as webhook_error, never raised."""
     bq = bigquery.Client(project=PROJECT_ID)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     try:
@@ -68,7 +83,7 @@ def main(request):
             item = pluggy_client().item(item_id)
             upsert(bq, item_id, now, event, connector=(item.get("connector") or {}).get("name"),
                    payload=json.dumps(item))
-            request_load(bq, item_id, item, body.get("eventId"))
+            request_load(bq, item_id, item, event_id)
             log_event(bq, "item_registered", "success",
                       {"item_id": item_id, "connector": (item.get("connector") or {}).get("name")})
         elif event == "item/deleted":
@@ -76,13 +91,12 @@ def main(request):
             log_event(bq, "item_deleted", "success", {"item_id": item_id})
         elif event == "item/updated":
             if note_event(bq, item_id, now, event):
-                request_load(bq, item_id, pluggy_client().item(item_id), body.get("eventId"))
+                request_load(bq, item_id, pluggy_client().item(item_id), event_id)
         else:
             note_event(bq, item_id, now, event)
     except Exception as e:
         log_event(bq, "webhook_error", "error",
                   {"item_id": item_id, "event": event, "error": str(e), "error_type": type(e).__name__})
-    return ("OK", 200)
 
 
 def request_load(bq, item_id, item, event_id):
