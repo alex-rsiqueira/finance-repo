@@ -139,9 +139,46 @@ class FakeBigQuery:
         self.tables.pop(ref, None)
 
 
+class FakeDataform:
+    """The Dataform API as start_bank_run calls it: the release config, then a workflow
+    invocation. runs lists the invocations' bodies; failure, when set, is an HTTP status the
+    release config answers with or an exception it raises; run_failure is a status the
+    invocation answers with."""
+
+    REPOSITORY = "https://dataform.googleapis.com/v1/projects/test-project/locations/us-central1/repositories/dataform-repo"
+    COMPILATION = "projects/test-project/locations/us-central1/repositories/dataform-repo/compilationResults/c-1"
+
+    def __init__(self):
+        self.runs, self.failure, self.run_failure, self.compilation = [], None, None, self.COMPILATION
+
+    @staticmethod
+    def answer(status, body):
+        r = requests.Response()
+        r.status_code, r.reason, r.url = status, "fake", "https://dataform.googleapis.com/fake"
+        r._content = json.dumps(body).encode()
+        return r
+
+    def get(self, url, timeout=None):
+        assert url == f"{self.REPOSITORY}/releaseConfigs/release-02" and timeout
+        if isinstance(self.failure, Exception):
+            raise self.failure
+        if self.failure:
+            return self.answer(self.failure, {"releaseCompilationResult": self.compilation})
+        return self.answer(200, {"name": "release-02", "releaseCompilationResult": self.compilation})
+
+    def post(self, url, json=None, timeout=None):
+        assert url == f"{self.REPOSITORY}/workflowInvocations" and timeout
+        if self.run_failure:
+            return self.answer(self.run_failure, {"name": "not started"})
+        self.runs.append(json)
+        return self.answer(200, {"name": f"{self.REPOSITORY[35:]}/workflowInvocations/run-{len(self.runs)}"})
+
+
 @pytest.fixture
 def env(monkeypatch):
     FakeBigQuery.tables, FakeBigQuery.merges = {}, []
+    dataform = FakeDataform()
+    monkeypatch.setattr(main, "dataform_session", lambda: dataform)
     bank = FakeBank()
     FakeNordigenClient.bank = bank
     sleeps = []
@@ -154,6 +191,7 @@ def env(monkeypatch):
     class Env:
         def __init__(self):
             self.bank, self.sleeps, self.tables, self.merges = bank, sleeps, FakeBigQuery.tables, FakeBigQuery.merges
+            self.dataform = dataform
 
         def run_at(self, when):
             ticks = []

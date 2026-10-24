@@ -11,12 +11,19 @@ its raw table on that table's key:
 
 A table that fails does not stop the others, but the run then raises, so the execution is
 reported as failed. Every row of a run carries the same dtinsert.
+
+A run that wrote rows - even beside a table that failed - then starts a Dataform run of the bank
+tag from release-02's compilation, so the tables the Bank tab reads take them in within minutes
+(finance-backend plans/bank-reads-from-tables.md §3.2). It is logged as dataform_run_started, or
+dataform_run_error when it cannot start; neither changes the load's outcome.
 """
 import json
 import os
 import uuid
 from datetime import datetime, timezone
 
+import google.auth
+from google.auth.transport.requests import AuthorizedSession
 from google.cloud import bigquery, secretmanager
 
 import gocardless
@@ -24,6 +31,12 @@ import gocardless
 PROJECT_ID = os.environ.get("PROJECT_ID", "")
 DATASET = os.environ.get("DATASET", "raw")
 LOG_TABLE = "tb_nordigen_ingestion_log"
+
+# The Dataform run after a load (finance-backend plans/bank-reads-from-tables.md §3.2).
+DATAFORM_API = "https://dataform.googleapis.com/v1"
+DATAFORM_LOCATION = "us-central1"
+DATAFORM_REPOSITORY = "dataform-repo"
+DATAFORM_RELEASE = os.environ.get("DATAFORM_RELEASE", "release-02")
 
 # raw table: (endpoint, path to the records in the answer, columns, key, update a matched row)
 TABLES = {
@@ -99,6 +112,9 @@ def main(event, context):
         log_event(bq, "ingestion_complete", "error" if failures else "success",
                   {"dtinsert": dtinsert, "accounts": accounts, "rows_written": rows_written,
                    "failures": failures})
+        # Whatever was written reaches the Bank tab, even when another table failed.
+        if sum(rows_written.values()):
+            start_bank_run(bq, {"dtinsert": dtinsert})
     except Exception as e:
         log_event(bq, "fatal_error", "error", {"error": str(e), "error_type": type(e).__name__})
         raise
@@ -106,6 +122,34 @@ def main(event, context):
     if failures:
         raise RuntimeError("Nordigen ingestion finished with errors: " + "; ".join(failures))
     return f"Nordigen ingestion complete: {accounts} accounts, rows written {rows_written}"
+
+
+def start_bank_run(bq, details):
+    """Start a Dataform run of the bank tag, so the tables the Bank tab reads take in what was just
+    loaded (finance-backend plans/bank-reads-from-tables.md D-1): from the release config's latest
+    compilation (D-6), whether or not another run is going (D-5). Never raises: the load is done
+    either way, and the daily run rebuilds the tables too."""
+    repository = f"projects/{PROJECT_ID}/locations/{DATAFORM_LOCATION}/repositories/{DATAFORM_REPOSITORY}"
+    try:
+        session = dataform_session()
+        release = session.get(f"{DATAFORM_API}/{repository}/releaseConfigs/{DATAFORM_RELEASE}", timeout=30)
+        release.raise_for_status()
+        compilation = release.json().get("releaseCompilationResult")
+        if not compilation:
+            raise RuntimeError(f"{DATAFORM_RELEASE} has no compilation result")
+        run = session.post(f"{DATAFORM_API}/{repository}/workflowInvocations", timeout=30, json={
+            "compilationResult": compilation, "invocationConfig": {"includedTags": ["bank"]}})
+        run.raise_for_status()
+        log_event(bq, "dataform_run_started", "success",
+                  {**details, "invocation": run.json().get("name"), "compilation": compilation})
+    except Exception as e:
+        log_event(bq, "dataform_run_error", "error", {**details, "error": str(e), "error_type": type(e).__name__})
+
+
+def dataform_session():
+    """An HTTP session authorised as the function's runtime account."""
+    credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    return AuthorizedSession(credentials)
 
 
 def load(bq, client, table, account_id, client_id, dtinsert):

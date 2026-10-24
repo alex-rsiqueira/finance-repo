@@ -201,3 +201,80 @@ def test_flatten_turns_nested_values_into_strings():
     assert main.flatten({"a": {"b": 1, "c": None}, "d": [1, 2], "e": "x", "f": True}) == {
         "a_b": "1", "d": "[1, 2]", "e": "x", "f": "true"}
     assert json.loads(main.flatten({"d": [1, 2]})["d"]) == [1, 2]
+
+
+# --- the bank run after a load (finance-backend plans/bank-reads-from-tables.md §3.2) ------
+
+BANK_RUN = {"compilationResult": "projects/test-project/locations/us-central1/repositories/dataform-repo/"
+                                 "compilationResults/c-1", "invocationConfig": {"includedTags": ["bank"]}}
+
+
+def test_a_load_that_wrote_rows_starts_one_bank_run_from_the_release(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.run()
+    assert env.dataform.runs == [BANK_RUN]
+    [started] = env.log("dataform_run_started")
+    details = json.loads(started["description"])
+    assert started["type"] == "Info" and details["invocation"].endswith("/workflowInvocations/run-1")
+    assert [r["error_code"] for r in env.log()][-2:] == ["ingestion_complete", "dataform_run_started"]
+
+
+def test_a_load_where_every_table_failed_starts_no_run(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    for endpoint in ("metadata", "details", "balances", "transactions"):
+        env.bank.answers[(A1, endpoint)] = [http_error(500)] * 4
+    with pytest.raises(RuntimeError):
+        env.run()
+    assert env.dataform.runs == []
+
+
+def test_a_table_that_failed_beside_others_that_loaded_still_starts_the_run(env):
+    """What did load reaches the Bank tab (decided 2026-10-24); the run is still reported failed."""
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.bank.answers[(A1, "transactions")] = [http_error(429, retry_after=5)]
+    with pytest.raises(RuntimeError, match="tb_nordigen_transactions"):
+        env.run()
+    assert env.dataform.runs == [BANK_RUN]
+
+
+def test_a_run_that_failed_before_loading_starts_none(env, monkeypatch):
+    import conftest
+
+    monkeypatch.setattr(conftest.FakeBigQuery, "credentials", [])
+    with pytest.raises(RuntimeError):
+        env.run()
+    assert env.dataform.runs == []
+
+
+@pytest.mark.parametrize("failure", [403, requests.ConnectionError("dataform unreachable")])
+def test_a_run_that_cannot_start_is_logged_and_the_load_still_succeeds(env, failure):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.dataform.failure = failure
+    assert "1 accounts" in env.run()
+    assert env.dataform.runs == []
+    [error] = env.log("dataform_run_error")
+    assert error["type"] == "Error"
+    if isinstance(failure, int):
+        assert str(failure) in error["message"], "the answer's status is what is logged"
+
+
+def test_an_invocation_the_api_refuses_is_logged_and_the_load_still_succeeds(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.dataform.run_failure = 403
+    assert "1 accounts" in env.run()
+    assert env.log("dataform_run_started") == []
+    assert "403" in env.log("dataform_run_error")[0]["message"]
+
+
+def test_a_release_with_no_compilation_is_logged_and_starts_nothing(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.dataform.compilation = None
+    env.run()
+    assert env.dataform.runs == []
+    assert "release-02 has no compilation result" in env.log("dataform_run_error")[0]["message"]
