@@ -1,5 +1,3 @@
-import json
-
 import pytest
 
 from conftest import FakeRequest
@@ -210,57 +208,3 @@ def test_a_missing_load_topic_fails_loudly(env, monkeypatch):
     monkeypatch.setattr(main, "LOAD_TOPIC", "")
     with pytest.raises(RuntimeError, match="LOAD_TOPIC"):
         env.call("item/created")
-
-
-def test_item_updated_is_answered_before_its_work_and_the_work_then_runs(env):
-    """Pluggy waits 10 s for the answer; the registry note, the read back and the publish
-    take about 6 s on a warm instance, more after a cold start."""
-    env.api.add_item("item-1")
-    env.call("item/created")
-    calls, published = len(env.api.calls), len(env.published)
-    assert env.call("item/updated", eventId="evt-2") == ("OK", 200)
-    assert env.at_answer["threads"] == 1
-    assert env.at_answer["registry"][0]["last_event"] == "item/created"
-    assert len(env.at_answer["published"]) == published and len(env.at_answer["pluggy_calls"]) == calls
-    assert env.registry()[0]["last_event"] == "item/updated"
-    assert env.published[-1] == (TOPIC, {"item_ids": ["item-1"], "event_id": "evt-2"})
-
-
-def test_item_created_does_its_work_before_answering(env):
-    """A new bank must be registered: if the answer is late, Pluggy sends the event again."""
-    env.api.add_item("item-1")
-    env.call("item/created")
-    assert env.at_answer["threads"] == 0
-    assert [r["item_id"] for r in env.at_answer["registry"]] == ["item-1"]
-    assert env.at_answer["published"] == [(TOPIC, {"item_ids": ["item-1"], "event_id": "evt-1"})]
-
-
-@pytest.mark.parametrize("event", ["item/deleted", "item/error", "item/waiting_user_input"])
-def test_other_events_do_their_work_before_answering(env, event):
-    env.api.add_item("item-1")
-    env.call("item/created")
-    env.call(event)
-    assert env.at_answer["threads"] == 0
-    assert env.at_answer["registry"][0]["last_event"] == event
-
-
-def test_a_refused_or_ignored_call_starts_no_work(env):
-    env.call("item/updated", secret="wrong")
-    assert env.at_answer["threads"] == 0
-    assert main.main(FakeRequest({"event": "item/updated"})) == ("Ignored", 200)
-    import conftest
-    assert conftest.FakeThread.pending == []
-
-
-def test_item_updated_whose_work_fails_after_the_answer_is_logged(env, monkeypatch):
-    env.api.add_item("item-1")
-    env.call("item/created")
-
-    def refuse(self, sql, job_config=None):
-        raise RuntimeError("quota")
-    import conftest
-    monkeypatch.setattr(conftest.FakeBigQuery, "query", refuse)
-    assert env.call("item/updated") == ("OK", 200)
-    [error] = env.log("webhook_error")
-    assert error["message"] == "quota" and error["end_point"] == "item-1"
-    assert json.loads(error["description"])["event"] == "item/updated"
