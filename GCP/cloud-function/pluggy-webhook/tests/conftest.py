@@ -1,4 +1,3 @@
-import copy
 import json
 import os
 import re
@@ -88,19 +87,6 @@ class FakePublisher:
             raise FakePublisher.failure
 
 
-class FakeThread:
-    """threading.Thread: started threads wait in `pending` until the test runs them, so a test
-    sees what had happened when the webhook answered."""
-
-    pending = []
-
-    def __init__(self, target, args=(), kwargs=None, daemon=None):
-        self.target, self.args, self.kwargs, self.daemon = target, args, kwargs or {}, daemon
-
-    def start(self):
-        FakeThread.pending.append(self)
-
-
 class Done:
     def __init__(self, affected=None):
         self.num_dml_affected_rows = affected
@@ -183,14 +169,12 @@ class FakeRequest:
 def env(monkeypatch):
     FakeBigQuery.tables, FakeBigQuery.queries = {}, []
     FakePublisher.messages, FakePublisher.registered_when_published, FakePublisher.failure = [], [], None
-    FakeThread.pending = []
     api = FakeApi()
     FakeSession.api = api
     monkeypatch.setattr(main, "PROJECT_ID", "test-project")
     monkeypatch.setattr(main, "EXPECTED_SECRET", "the-secret")
     monkeypatch.setattr(main, "LOAD_TOPIC", "the-topic")
     monkeypatch.setattr(main.pubsub_v1, "PublisherClient", FakePublisher)
-    monkeypatch.setattr(main.threading, "Thread", FakeThread)
     monkeypatch.setattr(main.bigquery, "Client", FakeBigQuery)
     monkeypatch.setattr(main.secretmanager, "SecretManagerServiceClient", FakeSecrets)
     monkeypatch.setattr(pluggy_api.requests, "Session", FakeSession)
@@ -202,18 +186,8 @@ def env(monkeypatch):
             self.published = FakePublisher.messages
 
         def call(self, event, item_id="item-1", secret="the-secret", **more):
-            """The webhook's answer. What had happened when it answered is kept in
-            self.at_answer; work it left to a thread then runs, as it would after the answer."""
             body = {"event": event, "eventId": "evt-1", "itemId": item_id, "triggeredBy": "USER", **more}
-            answer = main.main(FakeRequest(body, secret))
-            self.at_answer = {"registry": copy.deepcopy(self.registry()), "published": list(self.published),
-                              "pluggy_calls": list(self.api.calls), "log": list(self.log()),
-                              "threads": len(FakeThread.pending)}
-            while FakeThread.pending:
-                thread = FakeThread.pending.pop(0)
-                assert thread.daemon is not True, "a daemon thread is killed with the process"
-                thread.target(*thread.args, **thread.kwargs)
-            return answer
+            return main.main(FakeRequest(body, secret))
 
         def registry(self):
             return self.tables.get(REGISTRY, [])
