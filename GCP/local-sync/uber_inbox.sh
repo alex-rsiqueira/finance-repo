@@ -31,6 +31,12 @@ LOG="$HOME/Library/Logs/finance-uber-sync.log"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG"; }
 
 mkdir -p "$INBOX" "$PROCESSED"
+# Without Full Disk Access, macOS hands a launchd job an empty listing of ~/Documents rather
+# than an error, and every run would log "0 zip(s)" for ever. ls reports the refusal.
+if ! ls "$INBOX" > /dev/null 2>> "$LOG"; then
+  log "cannot read $INBOX: give /bin/bash Full Disk Access (System Settings > Privacy & Security)"
+  exit 1
+fi
 shopt -s nullglob nocaseglob
 
 # Older macOS keeps a file iCloud has not downloaded as .<name>.icloud; ask for it now, and it

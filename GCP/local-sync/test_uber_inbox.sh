@@ -1,5 +1,5 @@
 #!/bin/bash
-# Checks GCP/local-sync/uber_inbox.sh with fake brctl, gcloud, stat and sleep, on macOS or Linux:
+# Checks GCP/local-sync/uber_inbox.sh with fake brctl, gcloud, ls, stat and sleep, on macOS or Linux:
 #   bash GCP/local-sync/test_uber_inbox.sh "$PWD/GCP/local-sync/uber_inbox.sh"
 SCRIPT="$1"; ROOT="$(mktemp -d)"; FAIL=0
 setup() {
@@ -26,6 +26,12 @@ B
 [[ -e "$HOME/gcloud.fail" ]] && { echo "ERROR: offline" >&2; exit 1; }
 [[ "$1 $2" == "storage cp" ]] || exit 2
 dest="${4#gs://finance_uber_data/}"; mkdir -p "$(dirname "$ROOT_BUCKET/$dest")"; cp "$3" "$ROOT_BUCKET/$dest"
+B
+  # ls fails as macOS does when the job may not read ~/Documents (no Full Disk Access)
+  cat > "$ROOT/bin/ls" <<'B'
+#!/bin/bash
+[[ -e "$HOME/ls.fail" ]] && { echo "ls: Operation not permitted" >&2; exit 1; }
+exec /bin/ls "$@"
 B
   export ROOT_BUCKET="$ROOT/bucket"
   chmod +x "$ROOT/bin/"*
@@ -55,5 +61,9 @@ check "processed/ is never overwritten" '[[ $(cat "$PROCESSED/a.zip") == old && 
 
 setup; touch "$INBOX/.b.zip.icloud"; run
 check "an iCloud placeholder is asked to download" 'grep -q ".b.zip.icloud" "$HOME/brctl.calls"'
+
+setup; echo zipdata > "$INBOX/a.zip"; touch "$HOME/ls.fail"; run; code=$?
+check "an inbox it may not read is logged as such, not as empty" 'grep -q "Full Disk Access" "$HOME/Library/Logs/finance-uber-sync.log" && ! grep -q "0 zip" "$HOME/Library/Logs/finance-uber-sync.log"'
+check "and the run fails" '[[ $code -ne 0 && -f "$INBOX/a.zip" ]]'
 
 rm -rf "$ROOT"; exit $FAIL
