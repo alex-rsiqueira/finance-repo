@@ -1,0 +1,75 @@
+name: Deploy Uber ingestion
+
+# A merge to main that touches the Uber function deploys it straight after
+# CI. Same keyless sign-in and deploy account as deploy-pluggy.yml
+# (DEPLOY_SA_PROD, `production` environment). The function runs when a zip
+# lands in the Uber bucket's inbox/ (Eventarc trigger, set up once from
+# GCP/cloud-function/ingest-uber/README.md); nothing is run here.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "GCP/cloud-function/ingest-uber/**"
+      - ".github/workflows/deploy-uber.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write   # WIF - keyless auth to Google Cloud
+
+concurrency:
+  group: deploy-uber
+  cancel-in-progress: false
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.DEPLOY_SA_PROD }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy ingest-uber
+        # Builds from the folder (tests/ left out by .gcloudignore). The account
+        # it runs as, PROJECT_ID, one instance at most and 5 minutes are named,
+        # so a deploy never drifts. DATASET is not set, so it writes to raw.
+        # ingest_uber is a CloudEvent function: FUNCTION_SIGNATURE_TYPE tells
+        # the Functions Framework so. One event at a time: two zips loading at
+        # once would each see the other's rows as not yet logged.
+        run: |
+          gcloud run deploy ingest-uber \
+            --source GCP/cloud-function/ingest-uber \
+            --function ingest_uber \
+            --base-image python311 \
+            --project finances-314506 \
+            --region us-central1 \
+            --service-account 16973409618-compute@developer.gserviceaccount.com \
+            --memory 512Mi --cpu 1 --max-instances 1 --concurrency 1 --timeout 300 \
+            --no-allow-unauthenticated \
+            --update-env-vars "PROJECT_ID=finances-314506,FUNCTION_SIGNATURE_TYPE=cloudevent"
+
+      - name: Check the new revision is serving
+        run: |
+          read -r READY LATEST MEMORY CONCURRENCY <<< "$(gcloud run services describe ingest-uber \
+            --project finances-314506 --region us-central1 \
+            --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].resources.limits.memory,spec.template.spec.containerConcurrency)')"
+          SERVICE="$(gcloud run services describe ingest-uber \
+            --project finances-314506 --region us-central1 --format json)"
+          SIGNATURE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FUNCTION_SIGNATURE_TYPE") | .value' <<< "$SERVICE")"
+          echo "ready=$READY latest=$LATEST memory=$MEMORY concurrency=$CONCURRENCY signature=$SIGNATURE"
+          test "$READY" = "$LATEST"
+          test "$MEMORY" = "512Mi"
+          test "$CONCURRENCY" = "1"
+          test "$SIGNATURE" = "cloudevent"
