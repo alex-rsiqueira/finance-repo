@@ -23,6 +23,10 @@ touches this folder.
 
 ## One-time setup (after the first deploy)
 
+The project's IAM policy holds conditional bindings, so each project-level grant takes
+`--condition=None` (without it gcloud stops to ask). `--format=none` keeps it from printing the
+whole policy.
+
 ```bash
 PROJECT=finances-314506
 SA=16973409618-compute@developer.gserviceaccount.com
@@ -33,11 +37,11 @@ gcloud storage buckets add-iam-policy-binding gs://finance_uber_data \
 
 # Cloud Storage publishes its events through Pub/Sub.
 GCS_AGENT="$(gcloud storage service-agent --project=$PROJECT)"
-gcloud projects add-iam-policy-binding $PROJECT \
+gcloud projects add-iam-policy-binding $PROJECT --condition=None --format=none \
   --member="serviceAccount:$GCS_AGENT" --role=roles/pubsub.publisher
 
 # The trigger's account receives events and may call the (private) service.
-gcloud projects add-iam-policy-binding $PROJECT \
+gcloud projects add-iam-policy-binding $PROJECT --condition=None --format=none \
   --member="serviceAccount:$SA" --role=roles/eventarc.eventReceiver
 gcloud run services add-iam-policy-binding ingest-uber --region=us-central1 --project=$PROJECT \
   --member="serviceAccount:$SA" --role=roles/run.invoker
@@ -48,6 +52,14 @@ gcloud eventarc triggers create ingest-uber --project=$PROJECT --location=us-cen
   --event-filters="bucket=finance_uber_data" \
   --service-account="$SA"
 ```
+
+On 2026-10-28 the Pub/Sub grant failed with "Service account
+service-16973409618@gs-project-accounts.iam.gserviceaccount.com does not exist" even after
+`gcloud storage service-agent` had returned that address, and the trigger then could not be
+created. What worked: Cloud Run → `ingest-uber` → Triggers → Add trigger → Cloud Storage trigger
+(bucket `finance_uber_data`, event `google.cloud.storage.object.v1.finalized`, the Compute Engine
+default service account, retry off), clicking **Grant** on the Pub/Sub Publisher warning, then
+Save. The trigger in place is the one made there, named `ingest-uber`.
 
 ## Running a zip again
 

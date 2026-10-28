@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Uber inbox -> Cloud Storage (finance-backend plans/uber-ingestion.md §3.2).
+     Runs the installed copy of uber_inbox.sh, not the clone's (whose branch changes).
+     Install steps: the header of uber_inbox.sh. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.finances.uber-inbox</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/alexsandersiqueira/Library/Scripts/finance-uber-inbox.sh</string>
+  </array>
+
+  <!-- Every 30 minutes, and when it is loaded (login, or launchctl bootstrap) -->
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/alexsandersiqueira/Library/Logs/finance-uber-sync.err</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/alexsandersiqueira/Library/Logs/finance-uber-sync.err</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/Users/alexsandersiqueira/google-cloud-sdk/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>

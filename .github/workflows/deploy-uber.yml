@@ -47,7 +47,10 @@ jobs:
         # so a deploy never drifts. DATASET is not set, so it writes to raw.
         # ingest_uber is a CloudEvent function: FUNCTION_SIGNATURE_TYPE tells
         # the Functions Framework so. One event at a time: two zips loading at
-        # once would each see the other's rows as not yet logged.
+        # once would each see the other's rows as not yet logged. CPU stays
+        # allocated outside requests, as for Nordigen and Pluggy: with it
+        # throttled, the Dataform call after a load failed on a dropped
+        # connection (SSLEOFError, 2026-10-28 history load).
         run: |
           gcloud run deploy ingest-uber \
             --source GCP/cloud-function/ingest-uber \
@@ -56,7 +59,7 @@ jobs:
             --project finances-314506 \
             --region us-central1 \
             --service-account 16973409618-compute@developer.gserviceaccount.com \
-            --memory 512Mi --cpu 1 --max-instances 1 --concurrency 1 --timeout 300 \
+            --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --concurrency 1 --timeout 300 \
             --no-allow-unauthenticated \
             --update-env-vars "PROJECT_ID=finances-314506,FUNCTION_SIGNATURE_TYPE=cloudevent"
 
@@ -67,9 +70,11 @@ jobs:
             --format 'value(status.latestReadyRevisionName,status.latestCreatedRevisionName,spec.template.spec.containers[0].resources.limits.memory,spec.template.spec.containerConcurrency)')"
           SERVICE="$(gcloud run services describe ingest-uber \
             --project finances-314506 --region us-central1 --format json)"
+          THROTTLING="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/cpu-throttling"] // "unset"' <<< "$SERVICE")"
           SIGNATURE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FUNCTION_SIGNATURE_TYPE") | .value' <<< "$SERVICE")"
-          echo "ready=$READY latest=$LATEST memory=$MEMORY concurrency=$CONCURRENCY signature=$SIGNATURE"
+          echo "ready=$READY latest=$LATEST memory=$MEMORY concurrency=$CONCURRENCY cpu-throttling=$THROTTLING signature=$SIGNATURE"
           test "$READY" = "$LATEST"
           test "$MEMORY" = "512Mi"
           test "$CONCURRENCY" = "1"
+          test "$THROTTLING" = "false"
           test "$SIGNATURE" = "cloudevent"
