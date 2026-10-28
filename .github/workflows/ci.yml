@@ -31,6 +31,7 @@ jobs:
           -r GCP/cloud-function/atualiza-dados-nordigen/requirements.txt
           -r GCP/cloud-function/atualiza-dados-pluggy/requirements.txt
           -r GCP/cloud-function/pluggy-webhook/requirements.txt
+          -r GCP/cloud-function/ingest-uber/requirements.txt
           "setuptools<81" pytest ruff
 
       - name: Lint (fatal problems only)
@@ -48,4 +49,8 @@ jobs:
 
       - name: Tests (Pluggy webhook)
         working-directory: GCP/cloud-function/pluggy-webhook
+        run: python -m pytest -q tests
+
+      - name: Tests (Uber ingestion)
+        working-directory: GCP/cloud-function/ingest-uber
         run: python -m pytest -q tests
