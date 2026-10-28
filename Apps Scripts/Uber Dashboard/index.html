@@ -1,0 +1,725 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <base target="_top">
+  <meta charset="utf-8">
+  <title>Uber Spend Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root {
+      --bg: #f6f7f9; --card: #ffffff; --ink: #1a1a1a; --muted: #6b7280;
+      --ride: #276ef1; --eats: #05a357; --border: #e5e7eb;
+      --groceries: #f59e0b; --pharmacy: #ef4444; --pet: #8b5cf6; --restaurant: #05a357;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--ink); }
+    header { padding: 14px 28px; background: #000; color: #fff; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+    header .sub { color: #9ca3af; font-size: 13px; }
+    .filters { margin-left: auto; display: flex; align-items: center; gap: 8px; font-size: 13px; flex-wrap: wrap; }
+    .filters input[type="month"] { background: #1f2937; color: #fff; border: 1px solid #374151; border-radius: 6px; padding: 4px 8px; font-size: 13px; }
+    .filters button { background: #276ef1; color: #fff; border: 0; border-radius: 6px; padding: 6px 12px; font-size: 13px; cursor: pointer; }
+    .filters button.ghost { background: transparent; border: 1px solid #374151; color: #d1d5db; }
+    nav { background: #000; padding: 0 28px; display: flex; gap: 4px; }
+    nav button { background: transparent; color: #9ca3af; border: 0; padding: 10px 18px; font-size: 14px; cursor: pointer; border-bottom: 3px solid transparent; }
+    nav button.active { color: #fff; border-bottom-color: #276ef1; font-weight: 600; }
+    .wrap { max-width: 1240px; margin: 0 auto; padding: 24px; }
+    .selbar { display: none; align-items: center; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+    .selbar .chip { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
+    .kpi { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; }
+    .kpi .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+    .kpi .value { font-size: 26px; font-weight: 700; margin-top: 4px; }
+    .kpi .sub { font-size: 12px; color: var(--muted); margin-top: 2px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+    .card.full { grid-column: 1 / -1; }
+    .card h2 { margin: 0 0 14px; font-size: 15px; font-weight: 600; }
+    canvas { max-height: 320px; }
+    .loading { text-align: center; padding: 80px 0; color: var(--muted); }
+    #map { height: 420px; border-radius: 8px; }
+    .tbl-controls { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+    .tbl-controls input[type="search"] { flex: 1; min-width: 180px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; }
+    .tbl-controls select { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 13px; background: #fff; }
+    .chip { padding: 5px 12px; border-radius: 999px; border: 1px solid var(--border); background: #fff; font-size: 12px; cursor: pointer; }
+    .chip.on { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border); color: var(--muted); font-weight: 600; cursor: pointer; white-space: nowrap; user-select: none; }
+    th .arrow { font-size: 10px; }
+    td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    td.num, th.num { text-align: right; }
+    tr.total td { font-weight: 700; border-top: 2px solid var(--ink); border-bottom: 0; background: #fafafa; }
+    .ellip { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .more { margin: 12px auto 0; display: block; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; color: #fff; }
+    .tbl-meta { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+    nav { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    nav button { white-space: nowrap; }
+
+    @media (max-width: 800px) {
+      body { overflow-x: hidden; }
+      .grid { grid-template-columns: 1fr; }
+      header { padding: 12px 16px; }
+      header h1 { font-size: 17px; }
+      header .sub { display: none; }
+      .filters { margin-left: 0; width: 100%; }
+      .filters label { display: flex; align-items: center; gap: 4px; flex: 1 1 45%; min-width: 0; }
+      .filters input[type="month"] { flex: 1; min-width: 0; width: 100%; }
+      .filters button { flex: 1 1 auto; }
+      nav { padding: 0 8px; }
+      nav button { padding: 10px 14px; font-size: 13px; }
+      .wrap { padding: 12px; }
+      .kpis { grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 16px; }
+      .kpi { padding: 12px 14px; }
+      .kpi .value { font-size: 19px; }
+      .kpi .sub { font-size: 11px; }
+      .grid { gap: 12px; }
+      .card { padding: 14px; }
+      .card h2 { font-size: 14px; }
+      canvas { max-height: 240px; }
+      #map { height: 300px; }
+      .tbl-controls input[type="search"] { min-width: 100%; order: 9; }
+      .tbl-controls select { width: 100%; }
+      table { font-size: 12px; }
+      th, td { padding: 6px 6px; }
+      .ellip { max-width: 130px; }
+      .chip { padding: 6px 12px; }
+    }
+    @media (max-width: 400px) {
+      .kpis { grid-template-columns: 1fr 1fr; }
+      .kpi .value { font-size: 17px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Uber Spend</h1><span class="sub">rides + eats &middot; amounts in EUR &middot; click chart bars to cross-filter</span>
+    <div class="filters" id="filters" style="display:none">
+      <label>From <input type="month" id="fromMonth"></label>
+      <label>To <input type="month" id="toMonth"></label>
+      <button onclick="applyFilter()">Apply</button>
+      <button class="ghost" onclick="resetFilter()">Reset</button>
+      <button class="ghost" onclick="refreshAll()" title="Bypass the 30-min server cache">&#8635; Refresh data</button>
+    </div>
+  </header>
+  <nav>
+    <button id="tab-overview" class="active" onclick="showTab('overview')">Overview</button>
+    <button id="tab-rides" onclick="showTab('rides')">Rides</button>
+    <button id="tab-eats" onclick="showTab('eats')">Eats</button>
+  </nav>
+
+  <div class="wrap">
+    <!-- ============ OVERVIEW ============ -->
+    <div id="pane-overview">
+      <div class="loading" id="ov-loading">Loading data from BigQuery&hellip;</div>
+      <div id="ov-dash" style="display:none">
+        <div class="selbar" id="ov-selbar"></div>
+        <div class="kpis" id="ov-kpis"></div>
+        <div class="grid">
+          <div class="card full"><h2>Monthly spend</h2><canvas id="chMonthly"></canvas></div>
+          <div class="card"><h2>Spend by city</h2><canvas id="chCity"></canvas></div>
+          <div class="card"><h2>Rides vs Eats</h2><canvas id="chSplit"></canvas></div>
+          <div class="card"><h2>Top products (rides)</h2><canvas id="chProducts"></canvas></div>
+          <div class="card"><h2>Top restaurants (eats)</h2><canvas id="chRestaurants"></canvas></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ RIDES ============ -->
+    <div id="pane-rides" style="display:none">
+      <div class="loading" id="rd-loading">Loading ride details&hellip;</div>
+      <div id="rd-dash" style="display:none">
+        <div class="selbar" id="rd-selbar"></div>
+        <div class="kpis" id="rd-kpis"></div>
+        <div class="grid">
+          <div class="card full"><h2>Amount paid per month</h2><canvas id="rdMonthly"></canvas></div>
+          <div class="card"><h2>Top departure locations</h2><canvas id="rdFrom"></canvas></div>
+          <div class="card"><h2>Top destination locations</h2><canvas id="rdTo"></canvas></div>
+          <div class="card full">
+            <h2>Map analysis</h2>
+            <div class="tbl-controls">
+              <span class="chip on" id="mapDep" onclick="toggleMapLayer('dep')">Departures</span>
+              <span class="chip on" id="mapDst" onclick="toggleMapLayer('dst')">Destinations</span>
+              <span class="chip on" id="mapFilterChip" onclick="toggleMapFilter()" title="Pan/zoom the map to filter the ride history below to visible trips">Filter history by map view</span>
+            </div>
+            <div id="map"></div>
+          </div>
+          <div class="card full">
+            <h2>Ride history</h2>
+            <div class="tbl-controls">
+              <input type="search" id="rdSearch" placeholder="Search address, city, product&hellip;" oninput="renderRidesTable()">
+            </div>
+            <div style="overflow-x:auto"><table id="rdTable"></table></div>
+            <div class="tbl-meta" id="rdMeta"></div>
+            <button class="chip more" id="rdMore" onclick="ridesShown += 50; renderRidesTable(true)">Show 50 more</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============ EATS ============ -->
+    <div id="pane-eats" style="display:none">
+      <div class="loading" id="et-loading">Loading order details&hellip;</div>
+      <div id="et-dash" style="display:none">
+        <div class="selbar" id="et-selbar"></div>
+        <div class="kpis" id="et-kpis"></div>
+        <div class="grid">
+          <div class="card full"><h2>Amount paid per month by establishment type</h2><canvas id="etMonthly"></canvas></div>
+          <div class="card full"><h2>Top establishments</h2><canvas id="etTop"></canvas></div>
+          <div class="card full">
+            <h2>Order items</h2>
+            <div class="tbl-controls">
+              <span class="chip on" data-typ="all" onclick="setEatsType(this)">All</span>
+              <span class="chip" data-typ="restaurant" onclick="setEatsType(this)">Restaurants</span>
+              <span class="chip" data-typ="groceries" onclick="setEatsType(this)">Groceries</span>
+              <span class="chip" data-typ="pharmacy" onclick="setEatsType(this)">Pharmacy</span>
+              <span class="chip" data-typ="pet_shop" onclick="setEatsType(this)">Pet shop</span>
+              <input type="search" id="etSearch" placeholder="Search item or establishment&hellip;" oninput="renderEatsTable()">
+              <select id="etMode" onchange="renderEatsTable()">
+                <option value="detail">Item detail</option>
+                <option value="summary">Item summary (most bought / most spent)</option>
+              </select>
+            </div>
+            <div style="overflow-x:auto"><table id="etTable"></table></div>
+            <div class="tbl-meta" id="etMeta"></div>
+            <button class="chip more" id="etMore" onclick="eatsShown += 50; renderEatsTable(true)">Show 50 more</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // ---------- shared ----------
+    const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).trim();
+    const RIDE = css('--ride'), EATS = css('--eats');
+    const TYPE_COLORS = { groceries: css('--groceries'), pharmacy: css('--pharmacy'), pet_shop: css('--pet'), restaurant: css('--restaurant') };
+    const TYPE_LABELS = { groceries: 'Groceries', pharmacy: 'Pharmacy', pet_shop: 'Pet shop', restaurant: 'Restaurants' };
+    const fmtEur = v => '€' + Number(v || 0).toLocaleString('en-IE', { maximumFractionDigits: 0 });
+    const fmtEur2 = v => '€' + Number(v || 0).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const charts = {};
+    const state = { overview: null, rides: null, eats: null };
+    const MOB = window.matchMedia('(max-width: 800px)').matches;
+    const xTicks = MOB ? { maxTicksLimit: 8, maxRotation: 45 } : {};
+    // truncate long category labels (addresses, restaurant names) on small screens
+    const yTicks = MOB ? { callback: function (v) {
+      const l = this.getLabelForValue(v);
+      return l.length > 16 ? l.slice(0, 16) + '…' : l;
+    } } : {};
+    let fromM = '0000-00', toM = '9999-99';
+    let currentTab = 'overview';
+    let ridesShown = 50, eatsShown = 50;
+    let eatsType = 'all';
+    let map = null, depLayer = null, dstLayer = null, mapVis = { dep: true, dst: true };
+    let mapFilterOn = true, mapBounds = null, mapFitting = false;
+
+    // cross-filter selections per tab (null = no selection)
+    const ovSel = { month: null, city: null, type: null, detail: null };
+    const rdSel = { month: null, from: null, to: null };
+    const etSel = { month: null, rest: null };
+
+    function mkChart(id, cfg) {
+      if (charts[id]) charts[id].destroy();
+      charts[id] = new Chart(document.getElementById(id), cfg);
+    }
+    function sumBy(rows, keyFn, valFn) {
+      const m = new Map();
+      rows.forEach(r => { const k = keyFn(r); m.set(k, (m.get(k) || 0) + (valFn(r) || 0)); });
+      return m;
+    }
+    const inRange = d => { const m = d.slice(0, 7); return m >= fromM && m <= toM; };
+    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+
+    function hexToRgba(hex, a) {
+      const h = hex.replace('#', '');
+      const n = parseInt(h.length === 3 ? h.split('').map(c => c + c).join('') : h, 16);
+      return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+    }
+    // full color when selected/no selection; faded otherwise
+    const hl = (color, labels, selected) =>
+      labels.map(l => (selected == null || l === selected) ? color : hexToRgba(color, 0.25));
+    // toggle helper: click sets, click same value again clears
+    function toggleSel(selObj, key, value, rerender) {
+      selObj[key] = selObj[key] === value ? null : value;
+      rerender();
+    }
+    // click handler factory: resolves the clicked bar/arc label
+    function onBarClick(selObj, key, rerender) {
+      return (evt, elements, chart) => {
+        if (!elements.length) return;
+        toggleSel(selObj, key, chart.data.labels[elements[0].index], rerender);
+      };
+    }
+    function renderSelbar(id, selObj, labels, rerender) {
+      const el = document.getElementById(id);
+      const active = Object.entries(selObj).filter(([, v]) => v != null);
+      if (!active.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+      el.style.display = 'flex';
+      el.innerHTML = 'Filtered by: ' + active.map(([k, v]) =>
+        '<span class="chip" onclick="clearSel_(\'' + id + '\',\'' + k + '\')" title="Click to remove">' +
+        esc(labels[k] || k) + ': ' + esc(v) + ' ✕</span>').join('');
+      selbarRegistry[id] = { selObj, rerender };
+    }
+    const selbarRegistry = {};
+    function clearSel_(id, key) {
+      const e = selbarRegistry[id];
+      if (!e) return;
+      e.selObj[key] = null;
+      e.rerender();
+    }
+
+    function showTab(t) {
+      currentTab = t;
+      ['overview', 'rides', 'eats'].forEach(x => {
+        document.getElementById('pane-' + x).style.display = x === t ? 'block' : 'none';
+        document.getElementById('tab-' + x).classList.toggle('active', x === t);
+      });
+      if (t === 'rides' && !state.rides) loadRides(false);
+      if (t === 'eats' && !state.eats) loadEats(false);
+      if (t === 'rides' && map) setTimeout(() => map.invalidateSize(), 50);
+    }
+
+    function applyFilter() {
+      fromM = document.getElementById('fromMonth').value || '0000-00';
+      toM = document.getElementById('toMonth').value || '9999-99';
+      ridesShown = 50; eatsShown = 50;
+      renderAll();
+    }
+    function resetFilter() {
+      const f = document.getElementById('fromMonth'), t = document.getElementById('toMonth');
+      f.value = f.min; t.value = t.max;
+      [ovSel, rdSel, etSel].forEach(s => Object.keys(s).forEach(k => s[k] = null));
+      applyFilter();
+    }
+    function refreshAll() {
+      state.rides = null; state.eats = null;
+      loadOverview(true);
+      if (currentTab === 'rides') loadRides(true);
+      if (currentTab === 'eats') loadEats(true);
+    }
+    function renderAll() {
+      if (state.overview) renderOverview();
+      if (state.rides) renderRides();
+      if (state.eats) renderEats();
+    }
+
+    // ---------- loaders ----------
+    function loadOverview(force) {
+      document.getElementById('ov-dash').style.display = 'none';
+      document.getElementById('ov-loading').style.display = 'block';
+      google.script.run.withSuccessHandler(d => {
+        state.overview = d.rows.map(r => ({ ...r, month: r.month.slice(0, 7) }));
+        const months = state.overview.map(r => r.month);
+        const minM = months.reduce((a, b) => a < b ? a : b, '9999-99');
+        const maxM = months.reduce((a, b) => a > b ? a : b, '0000-00');
+        const f = document.getElementById('fromMonth'), t = document.getElementById('toMonth');
+        f.min = t.min = minM; f.max = t.max = maxM;
+        if (!f.value) { f.value = minM; t.value = maxM; }
+        document.getElementById('filters').style.display = 'flex';
+        document.getElementById('ov-loading').style.display = 'none';
+        document.getElementById('ov-dash').style.display = 'block';
+        renderOverview();
+      }).withFailureHandler(e => {
+        document.getElementById('ov-loading').textContent = 'Error: ' + e.message;
+      }).getDashboardData(!!force);
+    }
+    function loadRides(force) {
+      document.getElementById('rd-dash').style.display = 'none';
+      document.getElementById('rd-loading').style.display = 'block';
+      google.script.run.withSuccessHandler(d => {
+        state.rides = d.rows;
+        document.getElementById('rd-loading').style.display = 'none';
+        document.getElementById('rd-dash').style.display = 'block';
+        renderRides();
+      }).withFailureHandler(e => {
+        document.getElementById('rd-loading').textContent = 'Error: ' + e.message;
+      }).getRidesData(!!force);
+    }
+    function loadEats(force) {
+      document.getElementById('et-dash').style.display = 'none';
+      document.getElementById('et-loading').style.display = 'block';
+      google.script.run.withSuccessHandler(d => {
+        state.eats = d.rows;
+        document.getElementById('et-loading').style.display = 'none';
+        document.getElementById('et-dash').style.display = 'block';
+        renderEats();
+      }).withFailureHandler(e => {
+        document.getElementById('et-loading').textContent = 'Error: ' + e.message;
+      }).getEatsData(!!force);
+    }
+
+    // ---------- overview ----------
+    // rows filtered by month range + every selection except `exclude`'s dimension
+    function ovFilter(exclude) {
+      return state.overview.filter(r =>
+        r.month >= fromM && r.month <= toM &&
+        (exclude === 'month' || ovSel.month == null || r.month === ovSel.month) &&
+        (exclude === 'city' || ovSel.city == null || r.city === ovSel.city) &&
+        (exclude === 'type' || ovSel.type == null || r.spend_type === ovSel.type) &&
+        (exclude === 'detail' || ovSel.detail == null || r.detail === ovSel.detail));
+    }
+
+    function renderOverview() {
+      renderSelbar('ov-selbar', ovSel, { month: 'Month', city: 'City', type: 'Type', detail: 'Detail' }, renderOverview);
+      const rows = ovFilter(null);
+      const by = (rs, t) => rs.filter(r => r.spend_type === t);
+      const sum = (rs, f) => rs.reduce((a, r) => a + (r[f] || 0), 0);
+      const months = rows.map(r => r.month);
+      const span = months.length ? months.reduce((a, b) => a < b ? a : b) + ' → ' + months.reduce((a, b) => a > b ? a : b) : 'no data';
+      document.getElementById('ov-kpis').innerHTML = [
+        { label: 'Total spend', value: fmtEur(sum(rows, 'amount_eur')), sub: span },
+        { label: 'Rides', value: fmtEur(sum(by(rows, 'ride'), 'amount_eur')), sub: sum(by(rows, 'ride'), 'transactions') + ' trips' },
+        { label: 'Eats', value: fmtEur(sum(by(rows, 'eats'), 'amount_eur')), sub: sum(by(rows, 'eats'), 'transactions') + ' orders' },
+        { label: 'Distance ridden', value: Math.round(sum(by(rows, 'ride'), 'distance_km')).toLocaleString() + ' km', sub: 'completed trips' },
+      ].map(i => '<div class="kpi"><div class="label">' + i.label + '</div><div class="value">' + i.value + '</div><div class="sub">' + i.sub + '</div></div>').join('');
+
+      const mRows = ovFilter('month');
+      const ms = [...new Set(mRows.map(r => r.month))].sort();
+      const series = type => { const m = sumBy(by(mRows, type), r => r.month, r => r.amount_eur); return ms.map(x => m.get(x) || 0); };
+      mkChart('chMonthly', { type: 'bar',
+        data: { labels: ms, datasets: [
+          { label: 'Rides', data: series('ride'), backgroundColor: hl(RIDE, ms, ovSel.month), stack: 's' },
+          { label: 'Eats', data: series('eats'), backgroundColor: hl(EATS, ms, ovSel.month), stack: 's' }] },
+        options: { responsive: true, onClick: onBarClick(ovSel, 'month', renderOverview),
+          scales: { x: { stacked: true, ticks: xTicks }, y: { stacked: true, ticks: { callback: fmtEur } } },
+          plugins: { tooltip: { callbacks: { label: c => c.dataset.label + ': ' + fmtEur(c.raw) } } } } });
+
+      const cRows = ovFilter('city');
+      const cityTotals = sumBy(cRows, r => r.city, r => r.amount_eur);
+      const cities = [...cityTotals.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([c]) => c);
+      const citySeries = type => { const m = sumBy(by(cRows, type), r => r.city, r => r.amount_eur); return cities.map(c => m.get(c) || 0); };
+      mkChart('chCity', { type: 'bar',
+        data: { labels: cities, datasets: [
+          { label: 'Rides', data: citySeries('ride'), backgroundColor: hl(RIDE, cities, ovSel.city), stack: 's' },
+          { label: 'Eats', data: citySeries('eats'), backgroundColor: hl(EATS, cities, ovSel.city), stack: 's' }] },
+        options: { indexAxis: 'y', responsive: true, onClick: onBarClick(ovSel, 'city', renderOverview),
+          scales: { x: { stacked: true, ticks: { callback: fmtEur } }, y: { stacked: true, ticks: yTicks } } } });
+
+      const tRows = ovFilter('type');
+      const split = sumBy(tRows, r => r.spend_type, r => r.amount_eur);
+      const splitLabels = ['ride', 'eats'];
+      mkChart('chSplit', { type: 'doughnut',
+        data: { labels: ['Rides', 'Eats'], datasets: [{
+          data: splitLabels.map(t => split.get(t) || 0),
+          backgroundColor: splitLabels.map((t, i) => (ovSel.type == null || ovSel.type === t) ? [RIDE, EATS][i] : hexToRgba([RIDE, EATS][i], 0.25)) }] },
+        options: { aspectRatio: MOB ? 1.6 : 2, maintainAspectRatio: true,
+          onClick: (e, els) => { if (els.length) toggleSel(ovSel, 'type', splitLabels[els[0].index], renderOverview); },
+          plugins: { tooltip: { callbacks: { label: c => c.label + ': ' + fmtEur(c.raw) } } } } });
+
+      const top = (type, id, color) => {
+        const dRows = by(ovFilter('detail'), type);
+        const m = sumBy(dRows, r => r.detail, r => r.amount_eur);
+        const t = [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+        const labels = t.map(([d]) => d);
+        mkChart(id, { type: 'bar',
+          data: { labels: labels, datasets: [{ data: t.map(([, v]) => v), backgroundColor: hl(color, labels, ovSel.detail) }] },
+          options: { indexAxis: 'y', responsive: true, onClick: onBarClick(ovSel, 'detail', renderOverview),
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => fmtEur(c.raw) } } },
+            scales: { x: { ticks: { callback: fmtEur } }, y: { ticks: yTicks } } } });
+      };
+      top('ride', 'chProducts', RIDE);
+      top('eats', 'chRestaurants', EATS);
+    }
+
+    // ---------- rides ----------
+    const shortAddr = a => {
+      if (!a) return '(no address)';
+      const parts = a.split(',');
+      return parts.length > 2 ? parts.slice(0, 2).join(',') : a;
+    };
+
+    function rdFilter(exclude) {
+      return state.rides.filter(r =>
+        inRange(r.d) &&
+        (exclude === 'month' || rdSel.month == null || r.d.slice(0, 7) === rdSel.month) &&
+        (exclude === 'from' || rdSel.from == null || shortAddr(r.fa) === rdSel.from) &&
+        (exclude === 'to' || rdSel.to == null || shortAddr(r.ta) === rdSel.to));
+    }
+
+    function renderRides() {
+      renderSelbar('rd-selbar', rdSel, { month: 'Month', from: 'From', to: 'To' }, renderRides);
+      const rows = rdFilter(null);
+      const sum = f => rows.reduce((a, r) => a + (r[f] || 0), 0);
+      document.getElementById('rd-kpis').innerHTML = [
+        { label: 'Rides spend', value: fmtEur(sum('eur')), sub: rows.length + ' trips' },
+        { label: 'Avg per trip', value: fmtEur2(rows.length ? sum('eur') / rows.length : 0), sub: 'EUR' },
+        { label: 'Distance', value: Math.round(sum('km')).toLocaleString() + ' km', sub: Math.round(sum('mn')).toLocaleString() + ' min total' },
+        { label: 'Avg trip', value: (rows.length ? (sum('km') / rows.length).toFixed(1) : 0) + ' km', sub: (rows.length ? (sum('mn') / rows.length).toFixed(0) : 0) + ' min' },
+      ].map(i => '<div class="kpi"><div class="label">' + i.label + '</div><div class="value">' + i.value + '</div><div class="sub">' + i.sub + '</div></div>').join('');
+
+      const mRows = rdFilter('month');
+      const ms = [...new Set(mRows.map(r => r.d.slice(0, 7)))].sort();
+      const mm = sumBy(mRows, r => r.d.slice(0, 7), r => r.eur);
+      mkChart('rdMonthly', { type: 'bar',
+        data: { labels: ms, datasets: [{ data: ms.map(x => mm.get(x) || 0), backgroundColor: hl(RIDE, ms, rdSel.month) }] },
+        options: { responsive: true, onClick: onBarClick(rdSel, 'month', renderRides),
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => fmtEur(c.raw) } } },
+          scales: { x: { ticks: xTicks }, y: { ticks: { callback: fmtEur } } } } });
+
+      const topLoc = (field, id, selKey) => {
+        const lRows = rdFilter(selKey).filter(r => r[field]);
+        const m = sumBy(lRows, r => shortAddr(r[field]), r => r.eur);
+        const t = [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10);
+        const labels = t.map(([d]) => d);
+        mkChart(id, { type: 'bar',
+          data: { labels: labels, datasets: [{ data: t.map(([, v]) => v), backgroundColor: hl(RIDE, labels, rdSel[selKey]) }] },
+          options: { indexAxis: 'y', responsive: true, onClick: onBarClick(rdSel, selKey, renderRides),
+            plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => fmtEur(c.raw) } } },
+            scales: { x: { ticks: { callback: fmtEur } }, y: { ticks: yTicks } } } });
+      };
+      topLoc('fa', 'rdFrom', 'from');
+      topLoc('ta', 'rdTo', 'to');
+
+      renderMap(rows);
+      ridesShown = 50;
+      renderRidesTable();
+    }
+
+    function renderMap(rows) {
+      if (!map) {
+        map = L.map('map');
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+          attribution: '&copy; OpenStreetMap contributors', maxZoom: 18,
+        }).addTo(map);
+        map.on('moveend', () => {
+          // user pan/zoom filters the history grid; programmatic fitBounds resets it
+          mapBounds = mapFitting ? null : map.getBounds();
+          mapFitting = false;
+          if (mapFilterOn) renderRidesTable();
+        });
+      }
+      if (depLayer) map.removeLayer(depLayer);
+      if (dstLayer) map.removeLayer(dstLayer);
+      depLayer = L.layerGroup();
+      dstLayer = L.layerGroup();
+      const pts = [];
+      rows.forEach(r => {
+        if (r.fy != null && r.fx != null) {
+          pts.push([r.fy, r.fx]);
+          L.circleMarker([r.fy, r.fx], { radius: 4, color: RIDE, fillOpacity: .6, weight: 1 })
+            .bindPopup('<b>Departure</b><br>' + esc(shortAddr(r.fa)) + '<br>' + r.d + ' · ' + fmtEur2(r.eur)).addTo(depLayer);
+        }
+        if (r.ty != null && r.tx != null) {
+          pts.push([r.ty, r.tx]);
+          L.circleMarker([r.ty, r.tx], { radius: 4, color: '#ef4444', fillOpacity: .6, weight: 1 })
+            .bindPopup('<b>Destination</b><br>' + esc(shortAddr(r.ta)) + '<br>' + r.d + ' · ' + fmtEur2(r.eur)).addTo(dstLayer);
+        }
+      });
+      if (mapVis.dep) depLayer.addTo(map);
+      if (mapVis.dst) dstLayer.addTo(map);
+      if (pts.length) { mapFitting = true; map.fitBounds(pts, { padding: [20, 20] }); }
+      setTimeout(() => map.invalidateSize(), 50);
+    }
+
+    function toggleMapFilter() {
+      mapFilterOn = !mapFilterOn;
+      document.getElementById('mapFilterChip').classList.toggle('on', mapFilterOn);
+      renderRidesTable();
+    }
+
+    function toggleMapLayer(which) {
+      mapVis[which] = !mapVis[which];
+      document.getElementById(which === 'dep' ? 'mapDep' : 'mapDst').classList.toggle('on', mapVis[which]);
+      const layer = which === 'dep' ? depLayer : dstLayer;
+      if (!layer) return;
+      if (mapVis[which]) layer.addTo(map); else map.removeLayer(layer);
+      if (mapFilterOn && mapBounds) renderRidesTable(); // layer visibility affects the map-view filter
+    }
+
+    let rdSort = { col: 'd', dir: -1 };
+    function sortRidesBy(col) {
+      rdSort = { col, dir: rdSort.col === col ? -rdSort.dir : -1 };
+      renderRidesTable();
+    }
+    function renderRidesTable(more) {
+      if (!more) ridesShown = Math.max(ridesShown, 50);
+      const q = (document.getElementById('rdSearch').value || '').toLowerCase();
+      let rows = rdFilter(null);
+      if (q) rows = rows.filter(r => [r.fa, r.ta, r.city, r.p].some(x => (x || '').toLowerCase().includes(q)));
+      let mapNote = '';
+      if (mapFilterOn && mapBounds) {
+        const inB = (lat, lng) => lat != null && lng != null && mapBounds.contains([lat, lng]);
+        rows = rows.filter(r =>
+          (mapVis.dep && inB(r.fy, r.fx)) || (mapVis.dst && inB(r.ty, r.tx)));
+        mapNote = ' · limited to current map view';
+      }
+      rows.sort((a, b) => {
+        const x = a[rdSort.col], y = b[rdSort.col];
+        return (x == null ? -1 : y == null ? 1 : x < y ? -1 : x > y ? 1 : 0) * rdSort.dir;
+      });
+      const cols = [
+        ['d', 'Date'], ['city', 'City'], ['p', 'Product'],
+        ['fa', 'From'], ['ta', 'To'],
+        ['km', 'Km', 'num'], ['mn', 'Min', 'num'], ['eur', 'EUR', 'num'],
+      ];
+      const head = '<tr>' + cols.map(([c, l, cl]) =>
+        '<th class="' + (cl || '') + '" onclick="sortRidesBy(\'' + c + '\')">' + l +
+        (rdSort.col === c ? ' <span class="arrow">' + (rdSort.dir > 0 ? '▲' : '▼') + '</span>' : '') + '</th>').join('') + '</tr>';
+      const body = rows.slice(0, ridesShown).map(r => '<tr>' +
+        '<td>' + r.d + '</td><td>' + esc(r.city) + '</td><td>' + esc(r.p) + '</td>' +
+        '<td class="ellip" title="' + esc(r.fa) + '">' + esc(shortAddr(r.fa)) + '</td>' +
+        '<td class="ellip" title="' + esc(r.ta) + '">' + esc(shortAddr(r.ta)) + '</td>' +
+        '<td class="num">' + (r.km != null ? r.km.toFixed(1) : '') + '</td>' +
+        '<td class="num">' + (r.mn != null ? Math.round(r.mn) : '') + '</td>' +
+        '<td class="num">' + fmtEur2(r.eur) + '</td></tr>').join('');
+      const sum = f => rows.reduce((a, r) => a + (r[f] || 0), 0);
+      const totalRow = '<tr class="total"><td colspan="5">Total (' + rows.length + ' trips)</td>' +
+        '<td class="num">' + sum('km').toFixed(1) + '</td>' +
+        '<td class="num">' + Math.round(sum('mn')) + '</td>' +
+        '<td class="num">' + fmtEur2(sum('eur')) + '</td></tr>';
+      document.getElementById('rdTable').innerHTML = head + body + totalRow;
+      document.getElementById('rdMeta').textContent = 'Showing ' + Math.min(ridesShown, rows.length) + ' of ' + rows.length + ' trips · totals cover all filtered rows' + mapNote;
+      document.getElementById('rdMore').style.display = rows.length > ridesShown ? 'block' : 'none';
+    }
+
+    // ---------- eats ----------
+    function setEatsType(el) {
+      eatsType = el.dataset.typ;
+      document.querySelectorAll('#pane-eats .chip[data-typ]').forEach(c => c.classList.toggle('on', c === el));
+      eatsShown = 50;
+      renderEats(); // chips filter the whole tab: charts, KPIs and grid
+    }
+
+    function etFilter(exclude) {
+      return state.eats.filter(r =>
+        inRange(r.d) &&
+        (eatsType === 'all' || r.typ === eatsType) &&
+        (exclude === 'month' || etSel.month == null || r.d.slice(0, 7) === etSel.month) &&
+        (exclude === 'rest' || etSel.rest == null || r.rest === etSel.rest));
+    }
+    const orderLevel = rows => {
+      const seen = new Map();
+      rows.forEach(r => { if (!seen.has(r.ok)) seen.set(r.ok, r); });
+      return [...seen.values()];
+    };
+
+    function renderEats() {
+      renderSelbar('et-selbar', etSel, { month: 'Month', rest: 'Establishment' }, renderEats);
+      const itemRows = etFilter(null);
+      const orderRows = orderLevel(itemRows);
+      const total = orderRows.reduce((a, r) => a + (r.oeur || 0), 0);
+      const itemsTotal = itemRows.reduce((a, r) => a + (r.ieur || 0), 0);
+      const types = ['restaurant', 'groceries', 'pharmacy', 'pet_shop'];
+      const byType = sumBy(orderRows, r => r.typ, r => r.oeur);
+      document.getElementById('et-kpis').innerHTML = [
+        { label: 'Eats spend', value: fmtEur(total), sub: orderRows.length + ' orders · fees & discounts ' + fmtEur2(total - itemsTotal) },
+        { label: 'Restaurants', value: fmtEur(byType.get('restaurant')), sub: 'order totals' },
+        { label: 'Groceries', value: fmtEur(byType.get('groceries')), sub: 'order totals' },
+        { label: 'Pharmacy + Pet', value: fmtEur((byType.get('pharmacy') || 0) + (byType.get('pet_shop') || 0)), sub: 'order totals' },
+      ].map(i => '<div class="kpi"><div class="label">' + i.label + '</div><div class="value">' + i.value + '</div><div class="sub">' + i.sub + '</div></div>').join('');
+
+      const mOrders = orderLevel(etFilter('month'));
+      const ms = [...new Set(mOrders.map(r => r.d.slice(0, 7)))].sort();
+      mkChart('etMonthly', { type: 'bar',
+        data: { labels: ms, datasets: types.map(t => {
+          const m = sumBy(mOrders.filter(r => r.typ === t), r => r.d.slice(0, 7), r => r.oeur);
+          return { label: TYPE_LABELS[t], data: ms.map(x => m.get(x) || 0), backgroundColor: hl(TYPE_COLORS[t], ms, etSel.month), stack: 's' };
+        }) },
+        options: { responsive: true, onClick: onBarClick(etSel, 'month', renderEats),
+          scales: { x: { stacked: true, ticks: xTicks }, y: { stacked: true, ticks: { callback: fmtEur } } },
+          plugins: { tooltip: { callbacks: { label: c => c.dataset.label + ': ' + fmtEur(c.raw) } } } } });
+
+      const rOrders = orderLevel(etFilter('rest'));
+      const m = sumBy(rOrders, r => r.rest, r => r.oeur);
+      const top = [...m.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+      const topTypes = new Map(rOrders.map(r => [r.rest, r.typ]));
+      const labels = top.map(([d]) => d);
+      mkChart('etTop', { type: 'bar',
+        data: { labels: labels, datasets: [{ data: top.map(([, v]) => v),
+          backgroundColor: labels.map(d => (etSel.rest == null || etSel.rest === d) ? (TYPE_COLORS[topTypes.get(d)] || EATS) : hexToRgba(TYPE_COLORS[topTypes.get(d)] || EATS, 0.25)) }] },
+        options: { indexAxis: 'y', responsive: true, onClick: onBarClick(etSel, 'rest', renderEats),
+          plugins: { legend: { display: false }, tooltip: { callbacks: { label: c => fmtEur(c.raw) } } },
+          scales: { x: { ticks: { callback: fmtEur } }, y: { ticks: yTicks } } } });
+
+      eatsShown = 50;
+      renderEatsTable();
+    }
+
+    let etSort = { col: 'd', dir: -1 };
+    function sortEatsBy(col) {
+      etSort = { col, dir: etSort.col === col ? -etSort.dir : -1 };
+      renderEatsTable();
+    }
+    function renderEatsTable(more) {
+      if (!more) eatsShown = Math.max(eatsShown, 50);
+      const q = (document.getElementById('etSearch').value || '').toLowerCase();
+      const mode = document.getElementById('etMode').value;
+      let rows = etFilter(null);
+      if (q) rows = rows.filter(r => [r.item, r.rest].some(x => (x || '').toLowerCase().includes(q)));
+
+      if (mode === 'summary') {
+        const agg = new Map();
+        rows.forEach(r => {
+          const k = (r.item || '(unknown)') + '|' + r.typ;
+          const a = agg.get(k) || { item: r.item || '(unknown)', typ: r.typ, times: 0, qty: 0, eur: 0 };
+          a.times += 1; a.qty += (r.qty || 0); a.eur += (r.ieur || 0);
+          agg.set(k, a);
+        });
+        let list = [...agg.values()];
+        const col = etSort.col === 'd' ? 'eur' : etSort.col;
+        list.sort((a, b) => ((a[col] < b[col] ? -1 : a[col] > b[col] ? 1 : 0)) * etSort.dir);
+        const cols = [['item', 'Item'], ['typ', 'Type'], ['times', 'Orders', 'num'], ['qty', 'Total qty', 'num'], ['eur', 'Total EUR', 'num']];
+        const head = '<tr>' + cols.map(([c, l, cl]) =>
+          '<th class="' + (cl || '') + '" onclick="sortEatsBy(\'' + c + '\')">' + l +
+          (etSort.col === c ? ' <span class="arrow">' + (etSort.dir > 0 ? '▲' : '▼') + '</span>' : '') + '</th>').join('') + '</tr>';
+        const body = list.slice(0, eatsShown).map(a => '<tr>' +
+          '<td class="ellip" title="' + esc(a.item) + '">' + esc(a.item) + '</td>' +
+          '<td><span class="badge" style="background:' + (TYPE_COLORS[a.typ] || EATS) + '">' + (TYPE_LABELS[a.typ] || a.typ) + '</span></td>' +
+          '<td class="num">' + a.times + '</td><td class="num">' + a.qty + '</td>' +
+          '<td class="num">' + fmtEur2(a.eur) + '</td></tr>').join('');
+        const totalRow = '<tr class="total"><td colspan="2">Total (' + list.length + ' items)</td>' +
+          '<td class="num">' + list.reduce((a, x) => a + x.times, 0) + '</td>' +
+          '<td class="num">' + list.reduce((a, x) => a + x.qty, 0) + '</td>' +
+          '<td class="num">' + fmtEur2(list.reduce((a, x) => a + x.eur, 0)) + '</td></tr>';
+        document.getElementById('etTable').innerHTML = head + body + totalRow;
+        document.getElementById('etMeta').textContent = 'Showing ' + Math.min(eatsShown, list.length) + ' of ' + list.length + ' distinct items · ' + feesNote(rows, q);
+        document.getElementById('etMore').style.display = list.length > eatsShown ? 'block' : 'none';
+        return;
+      }
+
+      rows = [...rows].sort((a, b) => {
+        const x = a[etSort.col], y = b[etSort.col];
+        return (x == null ? -1 : y == null ? 1 : x < y ? -1 : x > y ? 1 : 0) * etSort.dir;
+      });
+      // unit price (EUR) is derived: line total EUR / quantity
+      rows = rows.map(r => ({ ...r, unit: r.qty ? (r.ieur || 0) / r.qty : r.ieur }));
+      const cols = [['d', 'Date'], ['rest', 'Establishment'], ['typ', 'Type'], ['item', 'Item'], ['qty', 'Qty', 'num'], ['unit', 'Unit price EUR', 'num'], ['ieur', 'Item EUR', 'num']];
+      const head = '<tr>' + cols.map(([c, l, cl]) =>
+        '<th class="' + (cl || '') + '" onclick="sortEatsBy(\'' + c + '\')">' + l +
+        (etSort.col === c ? ' <span class="arrow">' + (etSort.dir > 0 ? '▲' : '▼') + '</span>' : '') + '</th>').join('') + '</tr>';
+      const body = rows.slice(0, eatsShown).map(r => '<tr>' +
+        '<td>' + r.d + '</td>' +
+        '<td class="ellip" title="' + esc(r.rest) + '">' + esc(r.rest) + '</td>' +
+        '<td><span class="badge" style="background:' + (TYPE_COLORS[r.typ] || EATS) + '">' + (TYPE_LABELS[r.typ] || r.typ) + '</span></td>' +
+        '<td class="ellip" title="' + esc(r.item) + '">' + esc(r.item) + '</td>' +
+        '<td class="num">' + (r.qty || '') + '</td>' +
+        '<td class="num">' + (r.unit != null ? fmtEur2(r.unit) : '') + '</td>' +
+        '<td class="num">' + fmtEur2(r.ieur) + '</td></tr>').join('');
+      const sum = f => rows.reduce((a, r) => a + (r[f] || 0), 0);
+      const totalRow = '<tr class="total"><td colspan="4">Total (' + rows.length + ' item rows)</td>' +
+        '<td class="num">' + sum('qty') + '</td>' +
+        '<td class="num"></td>' +
+        '<td class="num">' + fmtEur2(sum('ieur')) + '</td></tr>';
+      document.getElementById('etTable').innerHTML = head + body + totalRow;
+      document.getElementById('etMeta').textContent = 'Showing ' + Math.min(eatsShown, rows.length) + ' of ' + rows.length + ' item rows · ' + feesNote(rows, q);
+      document.getElementById('etMore').style.display = rows.length > eatsShown ? 'block' : 'none';
+    }
+
+    // Explains grid total vs KPI cards: items = merchandise only; orders include
+    // delivery/service fees, taxes and discounts. Hidden while an item search is
+    // active (order totals would include non-matching items and mislead).
+    function feesNote(rows, q) {
+      if (q) return 'totals cover all filtered rows (items only, excl. fees)';
+      const items = rows.reduce((a, r) => a + (r.ieur || 0), 0);
+      const paid = orderLevel(rows).reduce((a, r) => a + (r.oeur || 0), 0);
+      return 'items total ' + fmtEur2(items) + ' · paid incl. fees & discounts ' + fmtEur2(paid) +
+        ' · difference ' + fmtEur2(paid - items);
+    }
+
+    // ---------- boot ----------
+    loadOverview(false);
+  </script>
+</body>
+</html>
