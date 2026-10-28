@@ -47,6 +47,9 @@ done
 
 zips=("$INBOX"/*.zip)
 log "run: ${#zips[@]} zip(s) in the inbox"
+# macOS's /bin/bash (3.2) calls an empty array unbound under set -u, so the loop below must not
+# see one: without this, every run with an empty inbox ended in an error.
+[[ ${#zips[@]} -eq 0 ]] && exit 0
 
 for zip in "${zips[@]}"; do
   name="$(basename "$zip")"

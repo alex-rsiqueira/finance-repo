@@ -39,8 +39,9 @@ B
 check() { if eval "$2"; then echo "ok   $1"; else echo "FAIL $1"; FAIL=1; fi; }
 run() { bash "$SCRIPT"; }
 
-setup; run
+setup; run 2> "$ROOT/err"; code=$?
 check "empty inbox: one log line, nothing uploaded" '[[ $(grep -c "0 zip" "$HOME/Library/Logs/finance-uber-sync.log") == 1 && -z "$(ls "$ROOT/bucket")" ]]'
+check "and the run succeeds, with nothing on stderr" '[[ $code -eq 0 && ! -s "$ROOT/err" ]]'
 
 setup; echo zipdata > "$INBOX/Uber Data Request A895E707 2.zip"; run
 check "stable zip uploaded under its own name" '[[ -f "$ROOT/bucket/inbox/Uber Data Request A895E707 2.zip" ]]'
