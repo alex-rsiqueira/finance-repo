@@ -1,5 +1,5 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import requests
@@ -31,20 +31,24 @@ def test_only_linked_requisitions_load(env):
     assert {r["account_id"] for r in env.rows("tb_nordigen_transactions")} == {A1}
 
 
-def test_rate_limit_is_not_retried_and_the_run_fails(env):
+def test_rate_limit_is_not_retried_recorded_at_zero_and_not_a_failure(env):
+    """plans/bank-refresh.md D-10: the account was read by a refresh earlier in its window."""
     env.bank.requisitions = [linked(A1)]
     env.bank.account(A1, transactions=[transaction("1")])
     env.bank.answers[(A1, "transactions")] = [http_error(429, retry_after=5)]
-    with pytest.raises(RuntimeError, match="tb_nordigen_transactions"):
-        env.run()
+    assert "1 accounts" in env.run()
     assert env.bank.calls.count((A1, "transactions")) == 1
     assert env.sleeps == []
     assert env.rows("tb_nordigen_transactions") == []
     assert len(env.rows("tb_nordigen_meta")) == 1
     assert len(env.rows("tb_nordigen_details")) == 1
     assert len(env.rows("tb_nordigen_balances")) == 2
-    assert len(env.log("table_processing_error")) == 1
-    assert env.log("ingestion_complete")[0]["type"] == "Error"
+    [limited] = env.log("rate_limited")
+    assert json.loads(limited["description"])["account_id"] == A1
+    assert env.log("table_processing_error") == []
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+    [row] = [r for r in env.rows("tb_nordigen_rate_limits") if r["scope"] == "transactions"]
+    assert (row["status"], row["remaining"], row["limit_count"], row["reset_at"]) == ("rate_limited", 0, None, None)
 
 
 def test_expired_access_is_not_retried(env):
@@ -234,7 +238,7 @@ def test_a_table_that_failed_beside_others_that_loaded_still_starts_the_run(env)
     """What did load reaches the Bank tab (decided 2026-10-24); the run is still reported failed."""
     env.bank.requisitions = [linked(A1)]
     env.bank.account(A1, transactions=[transaction("1")])
-    env.bank.answers[(A1, "transactions")] = [http_error(429, retry_after=5)]
+    env.bank.answers[(A1, "transactions")] = [http_error(401)]
     with pytest.raises(RuntimeError, match="tb_nordigen_transactions"):
         env.run()
     assert env.dataform.runs == [BANK_RUN]
@@ -278,3 +282,159 @@ def test_a_release_with_no_compilation_is_logged_and_starts_nothing(env):
     env.run()
     assert env.dataform.runs == []
     assert "release-02 has no compilation result" in env.log("dataform_run_error")[0]["message"]
+
+
+# --- the allowance and the app's refresh (finance-backend plans/bank-refresh.md) -------------
+
+def limits(env, **match):
+    return [r for r in env.rows("tb_nordigen_rate_limits") if all(r[k] == v for k, v in match.items())]
+
+
+def test_every_counted_call_records_the_allowance_it_reported(env):
+    env.bank.requisitions = [linked(A1, A2)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.bank.account(A2, transactions=[transaction("2")])
+    env.run()
+    rows = env.rows("tb_nordigen_rate_limits")
+    assert sorted((r["account_id"], r["scope"]) for r in rows) == sorted(
+        (a, s) for a in (A1, A2) for s in ("details", "balances", "transactions")), "no row for metadata"
+    for r in rows:
+        assert (r["limit_count"], r["remaining"], r["status"], r["client_id"]) == (4, 3, "ok", "client-1")
+        assert r["request_id"] is None and r["dtinsert"] == "2026-10-07 07:00:00"
+        observed = datetime.fromisoformat(r["observed_at"])
+        assert datetime.fromisoformat(r["reset_at"]) - observed == timedelta(seconds=21243)
+
+
+def test_a_second_run_records_what_the_first_left(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    env.run()
+    env.run({"account_ids": [A1], "request_id": "r-1"})
+    assert [r["remaining"] for r in limits(env, scope="balances")] == [3, 2]
+
+
+def test_an_answer_without_the_headers_records_unknown(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    env.bank.headers = False
+    env.run()
+    assert {(r["limit_count"], r["remaining"], r["reset_at"], r["status"])
+            for r in env.rows("tb_nordigen_rate_limits")} == {(None, None, None, "ok")}
+
+
+def test_a_rate_limit_answer_that_reports_the_allowance_keeps_its_reset(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    env.bank.answers[(A1, "balances")] = [http_error(429, headers={
+        "http_x_ratelimit_account_success_limit": "4", "http_x_ratelimit_account_success_remaining": "0",
+        "http_x_ratelimit_account_success_reset": "600"})]
+    env.run()
+    [row] = limits(env, scope="balances")
+    assert (row["status"], row["remaining"], row["limit_count"]) == ("rate_limited", 0, 4)
+    assert datetime.fromisoformat(row["reset_at"]) - datetime.fromisoformat(row["observed_at"]) == timedelta(seconds=600)
+
+
+def test_a_refresh_reads_only_its_accounts_balances_and_transactions(env):
+    env.bank.requisitions = [linked(A1, A2)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.bank.account(A2, transactions=[transaction("2")])
+    assert "1 accounts" in env.run({"account_ids": [A1], "request_id": "r-1"})
+    assert sorted(env.bank.calls) == [(A1, "balances"), (A1, "transactions")]
+    assert env.rows("tb_nordigen_meta") == [] and env.rows("tb_nordigen_details") == []
+    assert {r["account_id"] for r in env.rows("tb_nordigen_transactions")} == {A1}
+    assert {(r["scope"], r["request_id"]) for r in env.rows("tb_nordigen_rate_limits")} == {
+        ("balances", "r-1"), ("transactions", "r-1")}
+    [complete] = env.log("ingestion_complete")
+    details = json.loads(complete["description"])
+    assert (details["request_id"], details["requested"], details["skipped"]) == ("r-1", [A1], [])
+    assert json.loads(env.log("dataform_run_started")[0]["description"])["request_id"] == "r-1"
+
+
+def test_a_refresh_skips_an_account_no_linked_requisition_holds(env):
+    env.bank.requisitions = [linked(A2, status="EX"), linked(A1)]
+    env.bank.account(A1)
+    env.bank.account(A2)
+    env.run({"account_ids": [A2, A1, A1], "request_id": "r-2"})
+    assert {a for a, _ in env.bank.calls} == {A1}
+    assert env.bank.calls.count((A1, "balances")) == 1, "a repeated id is read once"
+    [unknown] = env.log("refresh_account_unknown")
+    assert json.loads(unknown["description"]) == {
+        "account_id": A2, "request_id": "r-2",
+        "error": "no linked requisition of an active credential holds this account: not read"}
+    details = json.loads(env.log("ingestion_complete")[0]["description"])
+    assert details["skipped"] == [A2] and env.log("ingestion_complete")[0]["type"] == "Info"
+
+
+@pytest.mark.parametrize("message", [{"account_ids": [], "request_id": "r-3"}, {"account_ids": "acc"}])
+def test_a_refresh_naming_no_account_reads_nothing(env, message):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    env.run(message)
+    assert env.bank.calls == []
+    assert env.dataform.runs == []
+
+
+@pytest.mark.parametrize("message", [None, {}, "trigger"])
+def test_any_other_message_is_a_full_run(env, message):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    env.run(message)
+    assert sorted(e for _, e in env.bank.calls) == ["balances", "details", "metadata", "transactions"]
+    assert {r["request_id"] for r in env.rows("tb_nordigen_rate_limits")} == {None}
+
+
+def test_a_failure_writing_the_allowance_fails_the_run_and_keeps_the_bank_rows(env, monkeypatch):
+    import conftest
+
+    original = conftest.FakeBigQuery.load_table_from_json
+
+    def refuse_limits(self, rows, ref, job_config=None):
+        if ref == conftest.LIMITS:
+            raise RuntimeError("Not found: Table tb_nordigen_rate_limits")
+        return original(self, rows, ref, job_config)
+
+    monkeypatch.setattr(conftest.FakeBigQuery, "load_table_from_json", refuse_limits)
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    with pytest.raises(RuntimeError, match="tb_nordigen_rate_limits"):
+        env.run()
+    assert len(env.rows("tb_nordigen_transactions")) == 1
+    assert env.dataform.runs == [BANK_RUN]
+
+
+def test_an_error_answer_that_is_not_json_is_raised_with_its_text(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    env.bank.answers[(A1, "details")] = [http_error(403, body="<html>Forbidden</html>")]
+    with pytest.raises(RuntimeError, match="Forbidden"):
+        env.run()
+    assert env.bank.calls.count((A1, "details")) == 1
+
+
+def test_a_rate_limit_from_bigquery_is_not_read_as_the_banks(env, monkeypatch):
+    """Only GoCardless's 429 (a requests.HTTPError) is D-10's; anything else stays a failure."""
+    import main
+    from types import SimpleNamespace
+
+    from google.api_core.exceptions import TooManyRequests
+
+    def busy(*args, **kwargs):
+        raise TooManyRequests("rate limited by BigQuery", response=SimpleNamespace(status_code=429, headers={}))
+
+    monkeypatch.setattr(main, "load", busy)
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    with pytest.raises(RuntimeError, match="BigQuery"):
+        env.run()
+    assert env.log("rate_limited") == []
+
+
+def test_allowance_reads_only_the_account_success_headers():
+    import gocardless
+
+    assert gocardless.allowance({
+        "http_x_ratelimit_limit": "100", "http_x_ratelimit_remaining": "99",
+        "http_x_ratelimit_account_success_limit": "4", "http_x_ratelimit_account_success_remaining": "2",
+        "http_x_ratelimit_account_success_reset": "21243"}) == {"limit": 4, "remaining": 2, "reset_seconds": 21243}
+    assert gocardless.allowance({"http_x_ratelimit_account_success_remaining": ""}) == {}
+    assert gocardless.allowance({}) == {}
