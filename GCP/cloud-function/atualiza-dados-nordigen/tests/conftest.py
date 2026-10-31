@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import re
@@ -14,24 +15,41 @@ import gocardless  # noqa: E402
 import main  # noqa: E402
 
 LOG = "test-project.raw.tb_nordigen_ingestion_log"
+LIMITS = "test-project.raw.tb_nordigen_rate_limits"
+API = "https://bankaccountdata.gocardless.com/api/v2"
 
 
-def http_error(status, retry_after=None):
+def http_error(status, retry_after=None, body=None, headers=None):
+    """GoCardless's answer with this status: body is its JSON (a GoCardless error by default) or a
+    str sent as is."""
     response = requests.Response()
     response.status_code = status
+    if body is None:
+        body = {"summary": f"error {status}", "detail": "fake", "status_code": status}
+    response._content = (body if isinstance(body, str) else json.dumps(body)).encode()
     if retry_after is not None:
         response.headers["Retry-After"] = str(retry_after)
+    response.headers.update(headers or {})
     return requests.HTTPError({"status": status}, response=response)
 
 
 class FakeBank:
     """What GoCardless answers. answers[(account_id, endpoint)] is a list consumed one call at
-    a time; an exception in it is raised, anything else returned. The last answer repeats."""
+    a time; an HTTPError in it is answered with its response, any other exception is raised,
+    anything else is the 200 body. The last answer repeats.
+
+    As GoCardless does, every 200 to details, balances or transactions spends one of the
+    account's calls for that scope and reports what is left in the account success headers
+    (left[(account_id, scope)], starting at LIMIT); headers=False answers without them."""
+
+    LIMIT, RESET_SECONDS = 4, 21243
 
     def __init__(self):
         self.requisitions = []
         self.answers = {}
         self.calls = []
+        self.left = {}
+        self.headers = True
 
     def account(self, account_id, transactions=(), balances=None, **extra):
         self.answers[(account_id, "metadata")] = [{
@@ -47,30 +65,46 @@ class FakeBank:
         self.answers[(account_id, "transactions")] = [{"transactions": {"booked": list(transactions), "pending": []}}]
         self.answers.update({(account_id, k): v for k, v in extra.items()})
 
-    def answer(self, account_id, endpoint):
+
+    def get(self, url, timeout=None, headers=None):
+        """requests.get as gocardless.Client calls it for one account endpoint."""
+        assert timeout and headers["Authorization"] == "Bearer token", headers
+        # Metadata is accounts/{id}/ itself; the three counted scopes are below it.
+        account_id, endpoint = re.fullmatch(
+            rf"{API}/accounts/([^/]+)/(?:(details|balances|transactions)/)?", url).groups()
+        endpoint = endpoint or "metadata"
         self.calls.append((account_id, endpoint))
         queue = self.answers[(account_id, endpoint)]
         value = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(value, requests.HTTPError):
+            return value.response
         if isinstance(value, Exception):
             raise value
-        return value
+        response = requests.Response()
+        response.status_code, response._content = 200, json.dumps(value).encode()
+        if endpoint != "metadata" and self.headers:
+            left = self.left.setdefault((account_id, endpoint), self.LIMIT) - 1
+            self.left[(account_id, endpoint)] = left
+            response.headers.update({
+                "http_x_ratelimit_account_success_limit": str(self.LIMIT),
+                "http_x_ratelimit_account_success_remaining": str(left),
+                "http_x_ratelimit_account_success_reset": str(self.RESET_SECONDS)})
+        return response
 
 
 class FakeNordigenClient:
     bank = None
+    base_url = API
 
     def __init__(self, secret_id, secret_key):
         assert secret_key == f"key-for-{secret_id}"
         bank = self.bank
+        self.token = None
         self.requisition = type("R", (), {"get_requisitions": lambda _self: {"results": bank.requisitions}})()
 
     def generate_token(self):
+        self.token = "token"
         return {"access": "token"}
-
-    def account_api(self, id):
-        bank = self.bank
-        return type("A", (), {f"get_{e}": (lambda _self, e=e: bank.answer(id, e))
-                              for e in ("metadata", "details", "balances", "transactions")})()
 
 
 class FakeSecrets:
@@ -125,6 +159,13 @@ class FakeBigQuery:
 
     def load_table_from_json(self, rows, ref, job_config=None):
         if ref == LOG:
+            self.tables.setdefault(ref, []).extend(rows)
+        elif ref == LIMITS:
+            assert job_config.write_disposition == "WRITE_APPEND"
+            assert all(set(r) == {f.name for f in job_config.schema} for r in rows)
+            required = {f.name for f in job_config.schema if f.mode == "REQUIRED"}
+            assert required == {"account_id", "client_id", "scope", "status", "observed_at", "dtinsert"}
+            assert all(r[name] is not None for r in rows for name in required)
             self.tables.setdefault(ref, []).extend(rows)
         else:
             assert "_tmp_" in ref
@@ -186,6 +227,7 @@ def env(monkeypatch):
     monkeypatch.setattr(main.bigquery, "Client", FakeBigQuery)
     monkeypatch.setattr(main.secretmanager, "SecretManagerServiceClient", FakeSecrets)
     monkeypatch.setattr(gocardless, "NordigenClient", FakeNordigenClient)
+    monkeypatch.setattr(gocardless.requests, "get", bank.get)
     monkeypatch.setattr(gocardless.time, "sleep", sleeps.append)
 
     class Env:
@@ -193,7 +235,8 @@ def env(monkeypatch):
             self.bank, self.sleeps, self.tables, self.merges = bank, sleeps, FakeBigQuery.tables, FakeBigQuery.merges
             self.dataform = dataform
 
-        def run_at(self, when):
+        def run_at(self, when, message=None):
+            """message is the Pub/Sub message's JSON (None for the scheduler's empty one)."""
             ticks = []
 
             class Clock(datetime):
@@ -203,10 +246,12 @@ def env(monkeypatch):
                     ticks.append(None)
                     return when + timedelta(seconds=len(ticks) - 1)
             monkeypatch.setattr(main, "datetime", Clock)
-            return main.main({}, None)
+            event = {} if message is None else {"data": base64.b64encode(
+                (message if isinstance(message, str) else json.dumps(message)).encode()).decode()}
+            return main.main(event, None)
 
-        def run(self):
-            return self.run_at(datetime(2026, 10, 7, 7, 0, 0, tzinfo=timezone.utc))
+        def run(self, message=None):
+            return self.run_at(datetime(2026, 10, 7, 7, 0, 0, tzinfo=timezone.utc), message)
 
         def rows(self, table):
             return self.tables.get(f"test-project.raw.{table}", [])
