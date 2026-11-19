@@ -19,6 +19,13 @@ LOAD_TOPIC, the topic that triggers atualiza-dados-pluggy, which then reads that
 An item still syncing, or whose sync failed, is left to its next item/updated or to the
 08:15 run. An item/updated for an item the registry does not hold reads and asks nothing.
 
+An item belongs to the integration it was connected through (finance-backend
+plans/bank-integrations.md D-3): a row of raw.app_bank_integrations holding the names of that
+Pluggy application's secrets. A new item says nothing of its application, so item/created
+reads it with each integration in turn - another application's item answers 404 - and the
+registry row takes the one that knows it. Later events read it with that integration alone.
+Integrations with no secrets (simulated), switched off or deleted are never tried.
+
 A call without the shared secret header is refused with 403, which Pluggy never retries.
 Anything that goes wrong after the header check is logged and answered 200: Pluggy retries
 a failed delivery three times and nothing here needs it, since every write is idempotent.
@@ -42,6 +49,7 @@ LOAD_TOPIC = os.environ.get("LOAD_TOPIC", "")
 # The whole answer must reach Pluggy within 10 s.
 PUBLISH_TIMEOUT = 5
 REGISTRY = "tb_pluggy_item_registry"
+INTEGRATIONS = "app_bank_integrations"
 LOG_TABLE = "tb_pluggy_ingestion_log"
 
 
@@ -65,18 +73,23 @@ def main(request):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     try:
         if event == "item/created":
-            item = pluggy_client().item(item_id)
+            integration_id, item = find_item(bq, item_id)
             upsert(bq, item_id, now, event, connector=(item.get("connector") or {}).get("name"),
-                   payload=json.dumps(item))
+                   payload=json.dumps(item), integration=integration_id)
             request_load(bq, item_id, item, body.get("eventId"))
             log_event(bq, "item_registered", "success",
-                      {"item_id": item_id, "connector": (item.get("connector") or {}).get("name")})
+                      {"item_id": item_id, "connector": (item.get("connector") or {}).get("name"),
+                       "integration_id": integration_id})
         elif event == "item/deleted":
             upsert(bq, item_id, now, event, deleted_at=now)
             log_event(bq, "item_deleted", "success", {"item_id": item_id})
         elif event == "item/updated":
             if note_event(bq, item_id, now, event):
-                request_load(bq, item_id, pluggy_client().item(item_id), body.get("eventId"))
+                its_own = integrations(bq, item_id)
+                if its_own:
+                    request_load(bq, item_id, pluggy_client(its_own[0]).item(item_id), body.get("eventId"))
+                else:
+                    log("INFO", "No load requested: the item's integration is not one to read", item_id=item_id)
         else:
             note_event(bq, item_id, now, event)
     except Exception as e:
@@ -104,20 +117,55 @@ def request_load(bq, item_id, item, event_id):
     log_event(bq, "load_requested", "success", {"item_id": item_id, "event_id": event_id})
 
 
-def pluggy_client():
+def integrations(bq, item_id=None):
+    """The Pluggy integrations to read with, oldest first: the newest version of each, active,
+    not deleted and holding both secret names. With item_id, only the one that item's registry
+    row names - none when it names none, or one that is not to be read."""
+    sql = f"""
+        SELECT integration_id, client_id_secret, client_secret_secret
+        FROM (
+          SELECT * FROM `{PROJECT_ID}.{DATASET}.{INTEGRATIONS}`
+          WHERE provider = 'pluggy'
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY version_ts DESC) = 1
+        )
+        WHERE is_active AND NOT is_deleted
+          AND client_id_secret IS NOT NULL AND client_secret_secret IS NOT NULL
+          AND (@item_id IS NULL OR integration_id = (
+                 SELECT integration_id FROM `{PROJECT_ID}.{DATASET}.{REGISTRY}` WHERE item_id = @item_id))
+        ORDER BY version_ts, integration_id
+    """
+    return [dict(row) for row in bq.query(sql, job_config=bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("item_id", "STRING", item_id)])).result()]
+
+
+def find_item(bq, item_id):
+    """(integration id, item) from the first integration whose application knows the item.
+    One that cannot sign in, or that answers 404 for another application's item, gives way to
+    the next; when none reads it, the last failure is raised and the item is not registered."""
+    failure = RuntimeError("no Pluggy integration to read the item with")
+    for integration in integrations(bq):
+        try:
+            return integration["integration_id"], pluggy_client(integration).item(item_id)
+        except Exception as e:
+            failure = e
+    raise failure
+
+
+def pluggy_client(integration):
     secrets = secretmanager.SecretManagerServiceClient()
     client_id, client_secret = (
         secrets.access_secret_version(
-            name=f"projects/{PROJECT_ID}/secrets/{name}/versions/latest"
+            name=f"projects/{PROJECT_ID}/secrets/{integration[name]}/versions/latest"
         ).payload.data.decode("UTF-8").strip()
-        for name in ("Pluggy_client_id", "Pluggy_client_secret")
+        for name in ("client_id_secret", "client_secret_secret")
     )
     return pluggy_api.Client(client_id, client_secret)
 
 
-def upsert(bq, item_id, now, event, connector=None, payload=None, deleted_at=None):
+def upsert(bq, item_id, now, event, connector=None, payload=None, deleted_at=None, integration=None):
     """One MERGE on item_id, parameterised: a registered item keeps its registered_at and
-    source; an item/created for a known item clears deleted_at (the connection is back)."""
+    source; an item/created for a known item clears deleted_at (the connection is back) and
+    takes the integration that has just read it. An item/deleted keeps the integration."""
     sql = f"""
         MERGE `{PROJECT_ID}.{DATASET}.{REGISTRY}` target
         USING (SELECT @item_id AS item_id) source
@@ -127,13 +175,14 @@ def upsert(bq, item_id, now, event, connector=None, payload=None, deleted_at=Non
           deleted_at = @deleted_at,
           last_event = @event,
           last_event_at = @now,
-          payload = COALESCE(PARSE_JSON(@payload), target.payload)
+          payload = COALESCE(PARSE_JSON(@payload), target.payload),
+          integration_id = COALESCE(@integration, target.integration_id)
         WHEN NOT MATCHED THEN INSERT
-          (item_id, connector_name, source, registered_at, deleted_at, last_event, last_event_at, payload)
-        VALUES (@item_id, @connector, 'webhook', @now, @deleted_at, @event, @now, PARSE_JSON(@payload))
+          (item_id, connector_name, source, registered_at, deleted_at, last_event, last_event_at, payload, integration_id)
+        VALUES (@item_id, @connector, 'webhook', @now, @deleted_at, @event, @now, PARSE_JSON(@payload), @integration)
     """
     run(bq, sql, item_id=item_id, connector=connector, deleted_at=deleted_at, event=event, now=now,
-        payload=payload)
+        payload=payload, integration=integration)
 
 
 def note_event(bq, item_id, now, event):

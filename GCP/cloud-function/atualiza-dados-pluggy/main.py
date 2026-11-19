@@ -8,8 +8,16 @@ Runs from Pub/Sub, on two kinds of message (plan pluggy-transactions §3.4, D-11
                        mark it deleted; any other is skipped and logged.
   anything else        the 08:15 scheduler's message: every item in raw.tb_pluggy_item_registry
                        not marked deleted (§3.3: the registry is kept by pluggy-webhook from
-                       Pluggy's item events, since Meu Pluggy items cannot be listed), plus
-                       whatever PLUGGY_ITEM_IDS still names.
+                       Pluggy's item events, since Meu Pluggy items cannot be listed).
+
+An item is read with the credentials of the integration it was connected through
+(finance-backend plans/bank-integrations.md D-3): tb_pluggy_item_registry.integration_id names
+a row of raw.app_bank_integrations, which holds the NAMES of the Secret Manager secrets with
+that Pluggy application's client id and secret. One sign-in per integration and run. An
+integration that cannot sign in is logged as integration_error and fails the run; its items
+are not read, and the other integrations' are. An integration with no secrets (a simulated
+one, the demo household's), switched off or deleted is not read and is no error. An item with
+no integration, or one that does not exist, fails the run as item_error: nothing can read it.
 
 A message is run at most twice. Its Pub/Sub message id (context.event_id) leads the
 description of the run's ingestion_complete or fatal_error row; a delivery whose message
@@ -53,9 +61,9 @@ import pluggy_api
 
 PROJECT_ID = os.environ.get("PROJECT_ID", "")
 DATASET = os.environ.get("DATASET", "raw")
-ITEM_IDS = [i.strip() for i in os.environ.get("PLUGGY_ITEM_IDS", "").split(",") if i.strip()]
 LOG_TABLE = "tb_pluggy_ingestion_log"
 REGISTRY = "tb_pluggy_item_registry"
+INTEGRATIONS = "app_bank_integrations"
 CONSENT_WARNING_DAYS = 30
 STALE_AFTER = timedelta(hours=36)
 REAUTHORISE = "authorise again in Meu Pluggy"
@@ -135,32 +143,52 @@ def main(event, context):
         requested = body.get("item_ids") if isinstance(body, dict) else None
         requested = list(dict.fromkeys(str(i) for i in requested)) if isinstance(requested, list) else []
 
-        item_ids = registered_items(bq)
-        skipped = []
-        if requested:
-            skipped = [i for i in requested if i not in item_ids]
-            item_ids = [i for i in requested if i in item_ids]
-            for item_id in skipped:
-                log_event(bq, "item_skipped", "success", {
-                    "item_id": item_id, "message_id": message_id,
-                    "error": "not in the registry, or marked deleted there: not read"})
-        else:
-            item_ids += [i for i in ITEM_IDS if i not in item_ids]
-            if not item_ids:
-                raise RuntimeError("No item to load: the registry is empty and PLUGGY_ITEM_IDS is not set")
-        log("INFO", "Items to load", items=item_ids, requested=requested or None, skipped=skipped)
+        registered = {row["item_id"]: row for row in registered_items(bq)}
+        skipped = [i for i in requested if i not in registered]
+        for item_id in skipped:
+            log_event(bq, "item_skipped", "success", {
+                "item_id": item_id, "message_id": message_id,
+                "error": "not in the registry, or marked deleted there: not read"})
+        in_scope = [i for i in (requested or registered) if i in registered]
+        # Nothing can read an item with no integration; one whose integration has no secrets
+        # to read (simulated, switched off, deleted) is left alone and is no error.
+        for item_id in in_scope:
+            if not registered[item_id]["integration_id"]:
+                failures.append(f"item {item_id}: no integration")
+                log_event(bq, "item_error", "error", {
+                    "item_id": item_id, "error": "no integration in the registry, or one that does not exist: not read"})
+        item_ids = [i for i in in_scope if registered[i]["client_id_secret"] and registered[i]["client_secret_secret"]]
+        if not item_ids and not requested and not failures:
+            raise RuntimeError("No item to load: the registry holds none to read")
+        integrations = {}
+        for item_id in item_ids:
+            integrations.setdefault(registered[item_id]["integration_id"], []).append(item_id)
+        log("INFO", "Items to load", items=item_ids, integrations=integrations, requested=requested or None,
+            skipped=skipped)
 
+        # One sign-in per integration. One that fails keeps its items from being read, not the others'.
         secrets = secretmanager.SecretManagerServiceClient()
-        client_id, client_secret = (
-            secrets.access_secret_version(
-                name=f"projects/{PROJECT_ID}/secrets/{name}/versions/latest"
-            ).payload.data.decode("UTF-8").strip()
-            for name in ("Pluggy_client_id", "Pluggy_client_secret")
-        )
-        client = pluggy_api.Client(client_id, client_secret)
+        clients = {}
+        for integration_id, its_items in integrations.items():
+            try:
+                client_id, client_secret = (
+                    secrets.access_secret_version(
+                        name=f"projects/{PROJECT_ID}/secrets/{registered[its_items[0]][name]}/versions/latest"
+                    ).payload.data.decode("UTF-8").strip()
+                    for name in ("client_id_secret", "client_secret_secret")
+                )
+                clients[integration_id] = pluggy_api.Client(client_id, client_secret)
+            except Exception as e:
+                failures.append(f"integration {integration_id}: {e}")
+                log_event(bq, "integration_error", "error", {
+                    "integration_id": integration_id, "items": its_items, "error": str(e),
+                    "error_type": type(e).__name__})
 
         gone = []
         for item_id in item_ids:
+            client = clients.get(registered[item_id]["integration_id"])
+            if client is None:
+                continue
             try:
                 for table, written in load_item(bq, client, item_id, dtinsert, started).items():
                     rows_written[table] += written
@@ -183,6 +211,7 @@ def main(event, context):
         # message_id first: the description is cut at 5000 characters and previous_runs looks for it.
         log_event(bq, "ingestion_complete", "error" if failures else "success",
                   {"message_id": message_id, "dtinsert": dtinsert, "items": item_ids,
+                   "integrations": integrations,
                    "requested": requested or None, "skipped": skipped, "gone": gone,
                    "rows_written": rows_written, "failures": failures})
         # Whatever was written reaches the Bank tab, even when another item failed.
@@ -227,13 +256,24 @@ def dataform_session():
 
 
 def registered_items(bq):
-    """The items of the registry not marked deleted, oldest registration first."""
+    """The items of the registry not marked deleted, oldest registration first, each with the
+    integration it was connected through: integration_id, None when the item names none or one
+    that does not exist; and the names of that integration's two secrets, None when it is not
+    to be read (no secrets, switched off, or deleted). An integration is its newest version."""
     rows = bq.query(f"""
-        SELECT item_id FROM `{PROJECT_ID}.{DATASET}.{REGISTRY}`
-        WHERE deleted_at IS NULL
-        ORDER BY registered_at, item_id
+        SELECT r.item_id, i.integration_id,
+               IF(i.is_active AND NOT i.is_deleted, i.client_id_secret, NULL) AS client_id_secret,
+               IF(i.is_active AND NOT i.is_deleted, i.client_secret_secret, NULL) AS client_secret_secret
+        FROM `{PROJECT_ID}.{DATASET}.{REGISTRY}` r
+        LEFT JOIN (
+          SELECT * FROM `{PROJECT_ID}.{DATASET}.{INTEGRATIONS}`
+          WHERE provider = 'pluggy'
+          QUALIFY ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY version_ts DESC) = 1
+        ) i ON i.integration_id = r.integration_id
+        WHERE r.deleted_at IS NULL
+        ORDER BY r.registered_at, r.item_id
     """).result()
-    return [row["item_id"] for row in rows]
+    return [dict(row) for row in rows]
 
 
 def previous_runs(bq, message_id):
@@ -252,14 +292,11 @@ def previous_runs(bq, message_id):
 
 
 def mark_deleted(bq, item_id, dtinsert):
-    """A 404 from Pluggy: the row gets deleted_at (and exists, for an item the variable named)."""
+    """A 404 from Pluggy: the item's registry row gets deleted_at."""
     bq.query(f"""
-        MERGE `{PROJECT_ID}.{DATASET}.{REGISTRY}` target
-        USING (SELECT @item_id AS item_id) source
-        ON target.item_id = source.item_id
-        WHEN MATCHED THEN UPDATE SET deleted_at = @now, last_event = 'load/404', last_event_at = @now
-        WHEN NOT MATCHED THEN INSERT (item_id, source, registered_at, deleted_at, last_event, last_event_at)
-        VALUES (@item_id, 'manual', @now, @now, 'load/404', @now)
+        UPDATE `{PROJECT_ID}.{DATASET}.{REGISTRY}`
+        SET deleted_at = @now, last_event = 'load/404', last_event_at = @now
+        WHERE item_id = @item_id
     """, job_config=bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("item_id", "STRING", item_id),
         bigquery.ScalarQueryParameter("now", "STRING", dtinsert)])).result()

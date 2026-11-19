@@ -21,15 +21,6 @@ concurrency:
   group: deploy-pluggy
   cancel-in-progress: false
 
-env:
-  # Meu Pluggy items the function loads besides raw.tb_pluggy_item_registry
-  # (plan pluggy-transactions §3.3: a bank connected in Meu Pluggy reaches the
-  # registry through the pluggy-webhook function and loads the next day, with
-  # no change here). Comma-separated, from the repository variable
-  # PLUGGY_ITEM_IDS (Settings > Secrets and variables > Actions > Variables);
-  # kept as a fallback for an item the webhook did not see, and may be empty.
-  PLUGGY_ITEM_IDS: ${{ vars.PLUGGY_ITEM_IDS }}
-
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
@@ -42,10 +33,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Show the item ids the variable still names
-        # May be empty: the registry carries the items (plan pluggy-transactions D-9).
-        run: echo "items=$PLUGGY_ITEM_IDS"
-
       - uses: google-github-actions/auth@v2
         with:
           workload_identity_provider: ${{ vars.WIF_PROVIDER }}
@@ -56,14 +43,16 @@ jobs:
       - name: Deploy atualiza-dados-pluggy
         # Builds from the folder (tests/ left out by .gcloudignore). Everything
         # the service depends on is named, so a deploy never drifts from it:
-        # the account it runs as, PROJECT_ID, the items, one instance at most,
-        # 5 minutes. DATASET is not set, so it writes to raw. CPU stays
+        # the account it runs as, PROJECT_ID, one instance at most, 5 minutes.
+        # The items come from raw.tb_pluggy_item_registry, each read with the
+        # credentials of its integration in raw.app_bank_integrations
+        # (finance-backend plans/bank-integrations.md D-3); PLUGGY_ITEM_IDS, the
+        # variable that once named them, is taken off the service. DATASET is not set, so it writes to raw. CPU stays
         # allocated outside requests, as for Nordigen. main(event, context) is
         # a Pub/Sub event function: without FUNCTION_SIGNATURE_TYPE=event the
         # Functions Framework calls it as an HTTP function, with one argument
         # (the Nordigen service has the same variable from its Cloud Functions
-        # origin). The env vars use @ as separator so the comma-separated item
-        # list stays one value. One request at a time: Pub/Sub redelivers a
+        # origin). One request at a time: Pub/Sub redelivers a
         # message it is still waiting on, and two runs at once would load the
         # same snapshot twice.
         run: |
@@ -76,7 +65,8 @@ jobs:
             --service-account 16973409618-compute@developer.gserviceaccount.com \
             --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --concurrency 1 --timeout 300 \
             --no-allow-unauthenticated \
-            --update-env-vars "^@^PROJECT_ID=finances-314506@FUNCTION_SIGNATURE_TYPE=event@PLUGGY_ITEM_IDS=${PLUGGY_ITEM_IDS}"
+            --remove-env-vars PLUGGY_ITEM_IDS \
+            --update-env-vars PROJECT_ID=finances-314506,FUNCTION_SIGNATURE_TYPE=event
 
       - name: Check the new revision is serving
         run: |
@@ -86,14 +76,13 @@ jobs:
           SERVICE="$(gcloud run services describe atualiza-dados-pluggy \
             --project finances-314506 --region us-central1 --format json)"
           THROTTLING="$(jq -r '.spec.template.metadata.annotations["run.googleapis.com/cpu-throttling"] // "unset"' <<< "$SERVICE")"
-          # An empty variable (every item now comes from the registry) is stored
-          # by Cloud Run as an env var with no value key: read it as "".
-          ITEMS="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_ITEM_IDS") | .value // ""' <<< "$SERVICE")"
+          # The retired variable must be gone, not merely empty.
+          ITEMS="$(jq -r '[.spec.template.spec.containers[0].env[] | select(.name == "PLUGGY_ITEM_IDS")] | length' <<< "$SERVICE")"
           SIGNATURE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FUNCTION_SIGNATURE_TYPE") | .value' <<< "$SERVICE")"
-          echo "ready=$READY latest=$LATEST memory=$MEMORY concurrency=$CONCURRENCY cpu-throttling=$THROTTLING items=$ITEMS signature=$SIGNATURE"
+          echo "ready=$READY latest=$LATEST memory=$MEMORY concurrency=$CONCURRENCY cpu-throttling=$THROTTLING item-variables=$ITEMS signature=$SIGNATURE"
           test "$READY" = "$LATEST"
           test "$MEMORY" = "512Mi"
           test "$CONCURRENCY" = "1"
           test "$THROTTLING" = "false"
-          test "$ITEMS" = "$PLUGGY_ITEM_IDS"
+          test "$ITEMS" = "0"
           test "$SIGNATURE" = "event"
