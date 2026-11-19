@@ -18,8 +18,22 @@ import pluggy_api  # noqa: E402
 
 LOG = "test-project.raw.tb_pluggy_ingestion_log"
 REGISTRY = "test-project.raw.tb_pluggy_item_registry"
+INTEGRATIONS = "test-project.raw.app_bank_integrations"
 ITEM_1 = "item-1"
 ITEM_2 = "item-2"
+# The integration every test starts with, and a second household's.
+INTEGRATION_1 = "integration-1"
+INTEGRATION_2 = "integration-2"
+# Secret Manager as the fakes hold it: the names an integration row carries, and their values.
+SECRETS = {
+    "Pluggy_client_id": "the-client-id\n", "Pluggy_client_secret": "the-client-secret",
+    "second-client-id": "second-client-id-value", "second-client-secret": "second-client-secret-value\n",
+}
+# What POST /auth answers each pair with: Pluggy's API key is the application's.
+API_KEYS = {
+    ("the-client-id", "the-client-secret"): "api-key",
+    ("second-client-id-value", "second-client-secret-value"): "second-api-key",
+}
 
 
 def response(status, body=None, retry_after=None):
@@ -43,8 +57,14 @@ class FakeApi:
         self.transaction_pages, self.bill_pages, self.investment_transaction_pages = {}, {}, {}
         self.failures = {}
         self.calls = []
+        # item -> the API key of the application it was connected through; read with another
+        # application's key Pluggy answers 404, as for an item it does not know.
+        self.owners = {}
+        self.refused = set()   # (client id, client secret) pairs POST /auth answers 401
 
-    def add_item(self, item_id, status="UPDATED", consent="2027-10-09T18:47:45.492Z", **fields):
+    def add_item(self, item_id, status="UPDATED", consent="2027-10-09T18:47:45.492Z", api_key="api-key",
+                 **fields):
+        self.owners[item_id] = api_key
         self.items[item_id] = {"id": item_id, "connector": {"id": 200, "name": "MeuPluggy"},
                                "status": status, "executionStatus": "SUCCESS",
                                "lastUpdatedAt": "2026-10-10T23:33:19.737Z", "consentExpiresAt": consent,
@@ -81,11 +101,21 @@ class FakeApi:
             return response(failure, retry_after=5 if failure in (429, 503) else None)
 
         if path == "/auth":
-            assert json == {"clientId": "the-client-id", "clientSecret": "the-client-secret"}
-            return response(200, {"apiKey": "api-key"})
-        assert headers["X-API-KEY"] == "api-key"
+            pair = (json["clientId"], json["clientSecret"])
+            if pair in self.refused:
+                return response(401)
+            return response(200, {"apiKey": API_KEYS[pair]})
+        key = headers["X-API-KEY"]
+        assert key in API_KEYS.values()
         if path.startswith("/items/"):
-            return response(200, self.items[path.split("/")[-1]])
+            item_id = path.split("/")[-1]
+            return response(200, self.items[item_id]) if self.owners[item_id] == key else response(404)
+        owner = (self.owners.get(query.get("itemId"))
+                 or next((self.owners[a["itemId"]] for accounts in self.accounts.values() for a in accounts
+                          if a["id"] == query.get("accountId")), None)
+                 or next((self.owners[i["itemId"]] for pages in self.investments.values() for page in pages
+                          for i in page if f"/investments/{i['id']}/" in path), None))
+        assert owner == key, f"{path} read with another application's key"
         if path == "/accounts":
             return response(200, {"results": self.accounts[query["itemId"]]})
         if path == "/v2/transactions":
@@ -122,10 +152,14 @@ class FakeSession:
 
 
 class FakeSecrets:
+    read = []
+
     def access_secret_version(self, name):
-        secret = re.search(r"secrets/(.+)/versions/latest", name).group(1)
-        value = {"Pluggy_client_id": "the-client-id\n", "Pluggy_client_secret": "the-client-secret"}[secret]
-        return type("S", (), {"payload": type("P", (), {"data": value.encode()})()})()
+        secret = re.search(r"^projects/test-project/secrets/(.+)/versions/latest$", name).group(1)
+        FakeSecrets.read.append(secret)
+        if secret not in SECRETS:
+            raise LookupError(f"Secret [{secret}] not found")
+        return type("S", (), {"payload": type("P", (), {"data": SECRETS[secret].encode()})()})()
 
 
 class Done:
@@ -149,11 +183,9 @@ class FakeBigQuery:
             params = {p.name: p.value for p in job_config.query_parameters}
             if sql.strip().startswith("SELECT"):
                 return self.previous_runs(sql, params)
-            return self.registry_merge(sql, params)
+            return self.registry_update(sql, params)
         if sql.strip().startswith("SELECT"):
-            assert f"`{REGISTRY}`" in sql and "deleted_at IS NULL" in sql, sql
-            rows = [r for r in self.tables.get(REGISTRY, []) if r.get("deleted_at") is None]
-            return Done(rows=sorted(rows, key=lambda r: (r["registered_at"], r["item_id"])))
+            return self.registered_items(sql)
         assert sql.strip().startswith("MERGE"), sql
         assert "BY SOURCE" not in sql, "the fake runs WHEN MATCHED and WHEN NOT MATCHED only"
         self.merges.append(sql)
@@ -187,19 +219,42 @@ class FakeBigQuery:
                 if r["error_code"] in ("ingestion_complete", "fatal_error") and params["needle"] in r["description"]]
         return Done(rows=[{"succeeded": sum(r["type"] == "Info" for r in runs), "runs": len(runs)}])
 
-    def registry_merge(self, sql, params):
-        """mark_deleted: one row keyed on item_id, deleted_at and the event set from the SQL."""
-        assert f"`{REGISTRY}` target" in sql and "ON target.item_id = source.item_id" in sql
+    def registered_items(self, sql):
+        """The registry read, as its SQL joins it: live rows, oldest first, each LEFT JOINed to
+        the newest version of the Pluggy integration it names, whose secret names show only
+        while that version is active and not deleted."""
+        flat = " ".join(sql.split())
+        assert f"FROM `{REGISTRY}` r LEFT JOIN ( SELECT * FROM `{INTEGRATIONS}`" in flat, sql
+        assert "WHERE provider = 'pluggy' QUALIFY ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY version_ts DESC) = 1" in flat, sql
+        assert ") i ON i.integration_id = r.integration_id WHERE r.deleted_at IS NULL ORDER BY r.registered_at, r.item_id" in flat, sql
+        for column in ("client_id_secret", "client_secret_secret"):
+            assert f"IF(i.is_active AND NOT i.is_deleted, i.{column}, NULL) AS {column}" in flat, sql
+        newest = {}
+        for row in sorted(self.tables.get(INTEGRATIONS, []), key=lambda r: r["version_ts"]):
+            if row["provider"] == "pluggy":
+                newest[row["row_id"]] = row
+        by_id = {row["integration_id"]: row for row in newest.values()}
+        out = []
+        for r in sorted(self.tables.get(REGISTRY, []), key=lambda r: (r["registered_at"], r["item_id"])):
+            if r.get("deleted_at") is not None:
+                continue
+            i = by_id.get(r.get("integration_id"))
+            readable = bool(i and i["is_active"] and not i["is_deleted"])
+            out.append({"item_id": r["item_id"], "integration_id": i["integration_id"] if i else None,
+                        "client_id_secret": i["client_id_secret"] if readable else None,
+                        "client_secret_secret": i["client_secret_secret"] if readable else None})
+        return Done(rows=out)
+
+    def registry_update(self, sql, params):
+        """mark_deleted: the item's row, deleted_at and the event set from the SQL."""
+        flat = " ".join(sql.split())
+        assert flat.startswith(f"UPDATE `{REGISTRY}` SET deleted_at = @now") and flat.endswith("WHERE item_id = @item_id"), sql
         self.merges.append(sql)
-        rows = self.tables.setdefault(REGISTRY, [])
         event = re.search(r"last_event = '([^']+)'", sql).group(1)
-        match = next((r for r in rows if r["item_id"] == params["item_id"]), None)
-        if match:
-            match.update({"deleted_at": params["now"], "last_event": event, "last_event_at": params["now"]})
-        else:
-            rows.append({"item_id": params["item_id"], "source": "manual", "registered_at": params["now"],
-                         "deleted_at": params["now"], "last_event": event, "last_event_at": params["now"]})
-        return Done(affected=1)
+        matches = [r for r in self.tables.get(REGISTRY, []) if r["item_id"] == params["item_id"]]
+        for row in matches:
+            row.update({"deleted_at": params["now"], "last_event": event, "last_event_at": params["now"]})
+        return Done(affected=len(matches))
 
     def load_table_from_json(self, rows, ref, job_config=None):
         if ref == LOG:
@@ -261,7 +316,7 @@ def env(monkeypatch):
     FakeSession.api = api
     sleeps = []
     monkeypatch.setattr(main, "PROJECT_ID", "test-project")
-    monkeypatch.setattr(main, "ITEM_IDS", [ITEM_1])
+    FakeSecrets.read = []
     monkeypatch.setattr(main.bigquery, "Client", FakeBigQuery)
     monkeypatch.setattr(main.secretmanager, "SecretManagerServiceClient", FakeSecrets)
     monkeypatch.setattr(pluggy_api.requests, "Session", FakeSession)
@@ -272,15 +327,33 @@ def env(monkeypatch):
             self.api, self.sleeps, self.tables, self.merges = api, sleeps, FakeBigQuery.tables, FakeBigQuery.merges
             self.dataform = dataform
 
-        def items(self, *item_ids):
-            monkeypatch.setattr(main, "ITEM_IDS", list(item_ids))
+            self.secrets_read = FakeSecrets.read
+            # Every test starts as prod does: one Pluggy integration, and ITEM_1 connected through it.
+            self.integration(INTEGRATION_1)
+            self.register(ITEM_1)
 
-        def register(self, *item_ids, deleted=False):
+        def items(self, *item_ids):
+            """The registry holds exactly these, in this order, on the first integration."""
+            self.tables[REGISTRY] = []
+            self.register(*item_ids)
+
+        def register(self, *item_ids, deleted=False, integration=INTEGRATION_1):
             rows = self.tables.setdefault(REGISTRY, [])
-            for n, item_id in enumerate(item_ids):
+            for item_id in item_ids:
                 rows.append({"item_id": item_id, "source": "webhook",
-                             "registered_at": f"2026-10-20 00:00:0{n}",
-                             "deleted_at": "2026-10-21 00:00:00" if deleted else None})
+                             "registered_at": f"2026-10-20 00:00:{len(rows):02d}",
+                             "deleted_at": "2026-10-21 00:00:00" if deleted else None,
+                             "integration_id": integration})
+
+        def integration(self, integration_id, client_id_secret="Pluggy_client_id",
+                        client_secret_secret="Pluggy_client_secret", provider="pluggy", is_active=True,
+                        is_deleted=False, version_ts="2026-11-19 22:00:00+00"):
+            """One version of an integration; a later version_ts for the same id is its newer version."""
+            self.tables.setdefault(INTEGRATIONS, []).append({
+                "row_id": f"row-{integration_id}", "version_ts": version_ts, "is_deleted": is_deleted,
+                "household_id": "HH_TEST", "integration_id": integration_id, "provider": provider,
+                "label": integration_id, "client_id_secret": client_id_secret,
+                "client_secret_secret": client_secret_secret, "is_active": is_active})
 
         def registry(self):
             return self.tables.get(REGISTRY, [])

@@ -4,7 +4,9 @@ from datetime import datetime, timezone
 import pytest
 import requests
 
-from conftest import ITEM_1, ITEM_2, LOG, bill, investment_transaction, transaction
+import main
+from conftest import (INTEGRATION_1, INTEGRATION_2, INTEGRATIONS, ITEM_1, ITEM_2, LOG, bill,
+                      investment_transaction, transaction)
 
 CHECKING = "acc-checking"
 CARD = "acc-card"
@@ -17,15 +19,17 @@ def one_item(env, transactions=None):
     env.api.add_account(ITEM_1, CHECKING, transactions=transactions or [[transaction("t1")]])
 
 
-def test_auth_refused_fails_at_once_without_retry(env):
+def test_auth_refused_fails_the_run_without_retry(env):
     one_item(env)
     env.api.failures["/auth"] = [401]
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(RuntimeError, match=f"integration {INTEGRATION_1}"):
         env.run()
     assert len(env.calls_to("/auth")) == 1
     assert env.sleeps == []
-    assert len(env.log("fatal_error")) == 1
-    assert env.merges == []
+    [error] = env.log("integration_error")
+    assert json.loads(error["description"])["items"] == [ITEM_1]
+    assert env.log("fatal_error") == [] and env.log("ingestion_complete")[0]["type"] == "Error"
+    assert env.calls_to(f"/items/{ITEM_1}") == [] and env.merges == []
 
 
 def test_item_not_updated_writes_its_snapshot_only_and_the_others_load(env):
@@ -287,36 +291,17 @@ def test_merge_sql_matches_each_table_on_its_key(env):
 
 def test_no_item_anywhere_is_a_failed_run(env):
     env.items()
-    with pytest.raises(RuntimeError, match="registry is empty and PLUGGY_ITEM_IDS is not set"):
+    with pytest.raises(RuntimeError, match="the registry holds none to read"):
         env.run()
     assert env.log("fatal_error")
 
 
 # --- the item registry (plan pluggy-transactions §3.3) -----------------------------
 
-def test_registered_items_load_without_the_variable(env):
-    env.items()
-    env.api.add_item(ITEM_1)
-    env.api.add_account(ITEM_1, CHECKING, transactions=[[transaction("t1")]])
-    env.register(ITEM_1)
-    env.run()
-    assert [r["item_id"] for r in env.rows("tb_pluggy_items")] == [ITEM_1]
-    assert env.log("ingestion_complete")[0]["type"] == "Info"
-
-
-def test_an_item_in_the_registry_and_the_variable_loads_once(env):
-    one_item(env)
-    env.register(ITEM_1)
-    env.run()
-    assert len(env.calls_to(f"/items/{ITEM_1}")) == 1
-    assert len(env.rows("tb_pluggy_items")) == 1
-
-
-def test_registry_items_come_first_then_the_variables_own(env):
+def test_items_load_oldest_registration_first(env):
+    env.items(ITEM_2, ITEM_1)
     env.api.add_item(ITEM_1)
     env.api.add_item(ITEM_2)
-    env.register(ITEM_2)
-    env.items(ITEM_1)
     env.run()
     assert [c[1] for c in env.api.calls if c[1].startswith("/items/")] == [f"/items/{ITEM_2}", f"/items/{ITEM_1}"]
 
@@ -340,15 +325,6 @@ def test_a_404_marks_the_item_deleted_and_the_run_succeeds(env):
     assert [r["item_id"] for r in env.rows("tb_pluggy_items")] == [ITEM_1]
     assert env.log("item_error") == [] and env.log("item_gone")[0]["end_point"] == ITEM_2
     assert env.log("ingestion_complete")[0]["type"] == "Info"
-
-
-def test_a_404_on_an_item_the_variable_names_writes_a_deleted_registry_row(env):
-    one_item(env)
-    env.items(ITEM_1, ITEM_2)
-    env.api.failures[f"/items/{ITEM_2}"] = [404]
-    env.run()
-    [row] = env.registry()
-    assert (row["item_id"], row["source"], row["deleted_at"]) == (ITEM_2, "manual", "2026-10-11 07:15:00")
 
 
 def test_a_403_is_still_a_failure_not_a_deletion(env):
@@ -419,7 +395,7 @@ def test_an_item_named_twice_in_a_message_loads_once(env):
 ])
 def test_a_message_naming_no_items_loads_every_item_as_the_0815_run(env, data):
     two_registered_items(env)
-    env.items("item-3")
+    env.register("item-3")
     env.api.add_item("item-3")
     env.deliver(data=data)
     assert items_read(env) == [ITEM_1, ITEM_2, "item-3"]
@@ -437,9 +413,8 @@ def test_a_listed_item_the_registry_marks_deleted_is_skipped_and_logged(env):
     assert complete(env)[0]["skipped"] == [ITEM_1]
 
 
-def test_a_listed_item_the_registry_does_not_hold_is_skipped_even_if_the_variable_names_it(env):
+def test_a_listed_item_the_registry_does_not_hold_is_skipped(env):
     two_registered_items(env)
-    env.items("ghost")
     env.api.add_item("ghost")
     assert "Pluggy ingestion complete" in env.deliver({"item_ids": ["ghost"]})
     assert items_read(env) == []
@@ -487,21 +462,26 @@ def test_a_failed_run_is_retried_once_and_not_again(env):
 def test_a_retry_that_succeeds_stops_the_redeliveries(env):
     two_registered_items(env)
     env.api.failures["/auth"] = [401]
-    with pytest.raises(requests.HTTPError):
+    with pytest.raises(RuntimeError):
         env.deliver()
     env.deliver()
     assert "skipped" in env.deliver()
-    assert [r["type"] for r in env.log("ingestion_complete")] == ["Info"]
+    assert [r["type"] for r in env.log("ingestion_complete")] == ["Error", "Info"]
 
 
-def test_a_fatal_error_counts_as_a_failed_run(env):
+def test_a_fatal_error_counts_as_a_failed_run(env, monkeypatch):
     two_registered_items(env)
-    env.api.failures["/auth"] = [401, 401]
+    reads = []
+
+    def unreadable(bq):
+        reads.append(1)
+        raise ConnectionError("BigQuery is not answering")
+    monkeypatch.setattr(main, "registered_items", unreadable)
     for _ in range(2):
-        with pytest.raises(requests.HTTPError):
+        with pytest.raises(ConnectionError):
             env.deliver()
     assert "skipped" in env.deliver()
-    assert len(env.calls_to("/auth")) == 2
+    assert len(reads) == 2 and env.calls_to("/auth") == []
     assert [json.loads(r["description"])["message_id"] for r in env.log("fatal_error")] == ["msg-1", "msg-1"]
 
 
@@ -621,3 +601,135 @@ def test_a_release_with_no_compilation_is_logged_and_starts_nothing(env):
     env.deliver()
     assert env.dataform.runs == []
     assert "release-02 has no compilation result" in env.log("dataform_run_error")[0]["message"]
+
+
+# --- integrations (finance-backend plans/bank-integrations.md D-3) --------------------
+
+def two_integrations(env):
+    """ITEM_1 on the first integration, ITEM_2 on a second with its own secrets and API key."""
+    env.integration(INTEGRATION_2, "second-client-id", "second-client-secret")
+    env.register(ITEM_2, integration=INTEGRATION_2)
+    env.api.add_item(ITEM_1)
+    env.api.add_account(ITEM_1, "acc-1", transactions=[[transaction("t-1")]])
+    env.api.add_item(ITEM_2, api_key="second-api-key")
+    env.api.add_account(ITEM_2, "acc-2", transactions=[[transaction("t-2")]])
+
+
+def test_each_item_is_read_with_its_own_integrations_credentials(env):
+    two_integrations(env)
+    env.run()   # the fake API refuses a read made with another application's key
+    assert items_read(env) == [ITEM_1, ITEM_2]
+    assert {r["account_id"] for r in env.rows("tb_pluggy_transactions")} == {"acc-1", "acc-2"}
+    assert env.secrets_read == ["Pluggy_client_id", "Pluggy_client_secret", "second-client-id", "second-client-secret"]
+
+
+def test_one_sign_in_per_integration_however_many_items(env):
+    two_integrations(env)
+    env.register("item-3")
+    env.api.add_item("item-3")
+    env.run()
+    assert len(env.calls_to("/auth")) == 2
+
+
+def test_the_run_names_each_integration_with_its_items(env):
+    two_integrations(env)
+    env.run()
+    assert complete(env)[0]["integrations"] == {INTEGRATION_1: [ITEM_1], INTEGRATION_2: [ITEM_2]}
+
+
+def test_an_integration_that_cannot_sign_in_fails_the_run_and_the_other_still_loads(env):
+    two_integrations(env)
+    env.api.refused.add(("second-client-id-value", "second-client-secret-value"))
+    with pytest.raises(RuntimeError, match=f"integration {INTEGRATION_2}"):
+        env.run()
+    assert items_read(env) == [ITEM_1]
+    assert {r["item_id"] for r in env.rows("tb_pluggy_items")} == {ITEM_1}
+    [error] = env.log("integration_error")
+    assert json.loads(error["description"])["integration_id"] == INTEGRATION_2
+    assert env.dataform.runs, "what the first integration loaded still reaches the Bank tab"
+
+
+def test_an_integration_whose_secret_is_missing_fails_the_run_and_the_other_still_loads(env):
+    two_integrations(env)
+    env.integration(INTEGRATION_2, "second-client-id", "no-such-secret", version_ts="2026-11-20 00:00:00+00")
+    with pytest.raises(RuntimeError, match="no-such-secret"):
+        env.run()
+    assert items_read(env) == [ITEM_1]
+    assert len(env.calls_to("/auth")) == 1 and len(env.log("integration_error")) == 1
+
+
+def test_an_integration_is_its_newest_version(env):
+    two_integrations(env)
+    env.integration(INTEGRATION_2, "Pluggy_client_id", "Pluggy_client_secret", version_ts="2026-11-18 00:00:00+00")
+    env.run()   # the older version's secrets would read ITEM_2 with the wrong key
+    assert items_read(env) == [ITEM_1, ITEM_2]
+
+
+@pytest.mark.parametrize("version", [
+    {"client_id_secret": None, "client_secret_secret": None},                 # simulated: the demo's
+    {"client_id_secret": "second-client-id", "client_secret_secret": None},   # half a pair
+    {"client_id_secret": None, "client_secret_secret": "second-client-secret"},   # the other half
+    {"is_active": False},                                                     # switched off
+    {"is_deleted": True},                                                     # deleted
+])
+def test_an_integration_not_to_be_read_is_left_alone_and_is_no_error(env, version):
+    two_integrations(env)
+    fields = {"client_id_secret": "second-client-id", "client_secret_secret": "second-client-secret", **version}
+    env.integration(INTEGRATION_2, version_ts="2026-11-20 00:00:00+00", **fields)
+    assert "1 items" in env.run()
+    assert items_read(env) == [ITEM_1] and len(env.calls_to("/auth")) == 1
+    assert env.log("item_error") == [] and env.log("integration_error") == []
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+
+
+@pytest.mark.parametrize("integration", [None, "no-such-integration"])
+def test_an_item_with_no_integration_fails_the_run_and_the_others_load(env, integration):
+    one_item(env)
+    env.register(ITEM_2, integration=integration)
+    env.api.add_item(ITEM_2)
+    with pytest.raises(RuntimeError, match=f"item {ITEM_2}: no integration"):
+        env.run()
+    assert items_read(env) == [ITEM_1]
+    assert [r["end_point"] for r in env.log("item_error")] == [ITEM_2]
+
+
+def test_another_providers_integration_does_not_read_a_pluggy_item(env):
+    one_item(env)
+    env.integration("gocardless-1", provider="gocardless")
+    env.register(ITEM_2, integration="gocardless-1")
+    env.api.add_item(ITEM_2)
+    with pytest.raises(RuntimeError, match=f"item {ITEM_2}: no integration"):
+        env.run()
+    assert items_read(env) == [ITEM_1]
+
+
+def test_only_integrations_not_to_be_read_is_a_failed_run_that_reads_nothing(env):
+    env.tables[INTEGRATIONS].clear()
+    env.integration(INTEGRATION_1, None, None)
+    env.api.add_item(ITEM_1)
+    with pytest.raises(RuntimeError, match="the registry holds none to read"):
+        env.run()
+    assert env.api.calls == []
+
+
+def test_a_message_naming_an_item_not_to_be_read_reads_nothing_and_succeeds(env):
+    two_integrations(env)
+    env.integration(INTEGRATION_2, None, None, version_ts="2026-11-20 00:00:00+00")
+    assert "0 items" in env.deliver({"item_ids": [ITEM_2]})
+    assert env.api.calls == [] and env.log("item_skipped") == []
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+
+
+def test_a_message_naming_an_item_with_no_integration_fails_and_names_only_that_item(env):
+    one_item(env)
+    env.register(ITEM_2, integration=None)
+    with pytest.raises(RuntimeError, match=f"item {ITEM_2}: no integration"):
+        env.deliver({"item_ids": [ITEM_2]})
+    assert env.api.calls == []
+
+
+def test_an_item_with_no_integration_does_not_fail_a_message_that_names_another(env):
+    one_item(env)
+    env.register(ITEM_2, integration=None)
+    assert "1 items" in env.deliver({"item_ids": [ITEM_1]})
+    assert env.log("item_error") == []

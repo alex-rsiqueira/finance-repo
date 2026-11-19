@@ -1,6 +1,6 @@
 import pytest
 
-from conftest import FakeRequest
+from conftest import INTEGRATION_1, INTEGRATION_2, INTEGRATIONS, FakeRequest
 import main
 
 
@@ -208,3 +208,107 @@ def test_a_missing_load_topic_fails_loudly(env, monkeypatch):
     monkeypatch.setattr(main, "LOAD_TOPIC", "")
     with pytest.raises(RuntimeError, match="LOAD_TOPIC"):
         env.call("item/created")
+
+
+# --- integrations (finance-backend plans/bank-integrations.md D-3) --------------------
+
+def second_integration(env):
+    env.integration(INTEGRATION_2, "second-client-id", "second-client-secret", version_ts="2026-11-20 00:00:00+00")
+
+
+def test_a_new_item_is_registered_on_the_integration_whose_application_knows_it(env):
+    second_integration(env)
+    env.api.add_item("item-1")
+    env.api.add_item("item-2", api_key="second-api-key")
+    env.call("item/created", item_id="item-1")
+    env.call("item/created", item_id="item-2")
+    assert {r["item_id"]: r["integration_id"] for r in env.registry()} == \
+        {"item-1": INTEGRATION_1, "item-2": INTEGRATION_2}
+    assert env.api.keys_used == ["api-key", "api-key", "second-api-key"]
+    assert [json_of(r)["integration_id"] for r in env.log("item_registered")] == [INTEGRATION_1, INTEGRATION_2]
+    assert len(env.published) == 2 and env.log("webhook_error") == []
+
+
+def json_of(row):
+    import json
+    return json.loads(row["description"])
+
+
+def test_an_integration_that_cannot_sign_in_gives_way_to_the_one_that_knows_the_item(env):
+    second_integration(env)
+    env.api.refused.add(("the-client-id", "the-client-secret"))
+    env.api.add_item("item-2", api_key="second-api-key")
+    env.call("item/created", item_id="item-2")
+    assert env.registry()[0]["integration_id"] == INTEGRATION_2
+
+
+def test_an_item_no_integration_knows_is_not_registered(env):
+    second_integration(env)
+    assert env.call("item/created", item_id="ghost") == ("OK", 200)
+    assert env.registry() == [] and env.published == []
+    assert env.api.keys_used == ["api-key", "second-api-key"]
+    assert "404" in env.log("webhook_error")[0]["message"]
+
+
+@pytest.mark.parametrize("version", [
+    {"client_id_secret": None, "client_secret_secret": None},   # simulated: the demo's
+    {"client_secret_secret": None},                             # half a pair
+    {"is_active": False},
+    {"is_deleted": True},
+    {"provider": "gocardless"},
+])
+def test_an_integration_not_to_be_read_is_never_tried(env, version):
+    env.tables[INTEGRATIONS].clear()
+    env.integration(INTEGRATION_1, **version)
+    env.api.add_item("item-1")
+    assert env.call("item/created") == ("OK", 200)
+    assert env.api.calls == [] and env.registry() == []
+    assert "no Pluggy integration" in env.log("webhook_error")[0]["message"]
+
+
+def test_an_integration_is_its_newest_version(env):
+    env.integration(INTEGRATION_1, "second-client-id", "second-client-secret", version_ts="2026-11-20 00:00:00+00")
+    env.api.add_item("item-1", api_key="second-api-key")
+    env.call("item/created")
+    assert env.registry()[0]["integration_id"] == INTEGRATION_1 and env.api.keys_used == ["second-api-key"]
+
+
+def test_item_updated_reads_the_item_with_its_own_integration_alone(env):
+    second_integration(env)
+    env.api.add_item("item-2", api_key="second-api-key")
+    env.call("item/created", item_id="item-2")
+    env.api.keys_used.clear()
+    env.call("item/updated", item_id="item-2", eventId="evt-2")
+    assert env.api.keys_used == ["second-api-key"]
+    assert env.published[-1][1] == {"item_ids": ["item-2"], "event_id": "evt-2"}
+
+
+@pytest.mark.parametrize("change", ["simulated", "none"])
+def test_item_updated_for_an_item_whose_integration_is_not_to_be_read_asks_for_nothing(env, change):
+    env.api.add_item("item-1")
+    env.call("item/created")
+    if change == "simulated":
+        env.integration(INTEGRATION_1, None, None, version_ts="2026-11-20 00:00:00+00")
+    else:
+        env.registry()[0]["integration_id"] = None
+    calls, published = len(env.api.calls), len(env.published)
+    assert env.call("item/updated") == ("OK", 200)
+    assert len(env.api.calls) == calls and len(env.published) == published
+    assert env.registry()[0]["last_event"] == "item/updated" and env.log("webhook_error") == []
+
+
+def test_item_deleted_keeps_the_integration_and_item_created_again_takes_the_one_that_reads_it(env):
+    second_integration(env)
+    env.api.add_item("item-1")
+    env.call("item/created")
+    env.call("item/deleted")
+    assert env.registry()[0]["integration_id"] == INTEGRATION_1
+    env.api.add_item("item-1", api_key="second-api-key")
+    env.call("item/created")
+    [row] = env.registry()
+    assert row["integration_id"] == INTEGRATION_2 and row["deleted_at"] is None
+
+
+def test_item_deleted_for_an_unknown_item_names_no_integration(env):
+    env.call("item/deleted", item_id="old")
+    assert env.registry()[0]["integration_id"] is None
