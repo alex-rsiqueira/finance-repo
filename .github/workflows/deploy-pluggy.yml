@@ -1,7 +1,8 @@
 name: Deploy Pluggy ingestion
 
 # A merge to main that touches the Pluggy function deploys it straight after
-# CI. Same keyless sign-in and deploy account as deploy-nordigen.yml
+# CI, twice: atualiza-dados-pluggy for prod (raw) and atualiza-dados-pluggy-dev for
+# dev (raw_dev), the same code. Same keyless sign-in and deploy account as deploy-nordigen.yml
 # (DEPLOY_SA_PROD, `production` environment). The function is not invoked
 # here: the first run after a deploy is the scheduled 08:15 one.
 
@@ -85,4 +86,38 @@ jobs:
           test "$CONCURRENCY" = "1"
           test "$THROTTLING" = "false"
           test "$ITEMS" = "0"
+          test "$SIGNATURE" = "event"
+
+      - name: Deploy atualiza-dados-pluggy-dev
+        # Dev's own load (finance-backend plans/bank-integrations.md, Connect a bank):
+        # the same build and settings, writing raw_dev, so a bank connected from the
+        # app on dev loads as on prod. It reads raw_dev's registry and integrations,
+        # each item with its own integration's secrets. Its trigger is its own topic,
+        # atualiza-dados-pluggy-dev, which finance-api-dev-run alone publishes to;
+        # the topic, its push subscription (ack deadline 300 s) and that grant are
+        # set by hand. It has no 08:15 schedule.
+        run: |
+          gcloud run deploy atualiza-dados-pluggy-dev \
+            --source GCP/cloud-function/atualiza-dados-pluggy \
+            --function main \
+            --base-image python311 \
+            --project finances-314506 \
+            --region us-central1 \
+            --service-account 16973409618-compute@developer.gserviceaccount.com \
+            --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --concurrency 1 --timeout 300 \
+            --no-allow-unauthenticated \
+            --labels env=dev \
+            --update-env-vars PROJECT_ID=finances-314506,FUNCTION_SIGNATURE_TYPE=event,DATASET=raw_dev
+
+      - name: Check the dev revision is serving and writes raw_dev
+        run: |
+          SERVICE="$(gcloud run services describe atualiza-dados-pluggy-dev \
+            --project finances-314506 --region us-central1 --format json)"
+          READY="$(jq -r '.status.latestReadyRevisionName' <<< "$SERVICE")"
+          LATEST="$(jq -r '.status.latestCreatedRevisionName' <<< "$SERVICE")"
+          DATASET="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "DATASET") | .value' <<< "$SERVICE")"
+          SIGNATURE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FUNCTION_SIGNATURE_TYPE") | .value' <<< "$SERVICE")"
+          echo "ready=$READY latest=$LATEST dataset=$DATASET signature=$SIGNATURE"
+          test "$READY" = "$LATEST"
+          test "$DATASET" = "raw_dev"
           test "$SIGNATURE" = "event"
