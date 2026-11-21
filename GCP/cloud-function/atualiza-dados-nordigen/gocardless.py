@@ -55,12 +55,20 @@ class Client:
     def __init__(self, secret_id, secret_key):
         self.api = NordigenClient(secret_id=secret_id, secret_key=secret_key)
         call(self.api.generate_token)
+        self._requisitions = None
+
+    def requisitions(self):
+        """Every requisition of these credentials, as GoCardless lists them: one per bank
+        authorisation, expired ones included. Asked once per client."""
+        if self._requisitions is None:
+            self._requisitions = call(self.api.requisition.get_requisitions)["results"]
+        return self._requisitions
 
     def linked_account_ids(self):
         """Account ids of the requisitions whose bank authorisation is still valid (status LN).
         An expired or removed requisition needs the bank to be authorised again, so this
         fails instead of creating a new one."""
-        requisitions = call(self.api.requisition.get_requisitions)["results"]
+        requisitions = self.requisitions()
         linked = [r for r in requisitions if r["status"] == "LN"]
         if not linked:
             statuses = sorted({r["status"] for r in requisitions})
@@ -75,6 +83,16 @@ class Client:
         path = f"accounts/{account_id}/" + ("" if endpoint == "metadata" else f"{endpoint}/")
         answer = call(self.get, path)
         return answer.json(), allowance(answer.headers)
+
+    def agreement(self, agreement_id):
+        """The end user agreement a requisition was created with: when it was accepted and for
+        how many days (finance-backend plans/bank-integrations.md D-16). Not counted against an
+        account's allowance."""
+        return call(self.get, f"agreements/enduser/{agreement_id}/").json()
+
+    def institution(self, institution_id):
+        """The bank a requisition is with: its name, as GoCardless gives it."""
+        return call(self.get, f"institutions/{institution_id}/").json()
 
     def get(self, path):
         """One GET, raised as the nordigen library raises it: an HTTPError carrying GoCardless's
