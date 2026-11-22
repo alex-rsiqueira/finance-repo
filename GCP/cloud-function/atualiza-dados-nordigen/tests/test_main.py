@@ -616,3 +616,14 @@ def test_the_registry_is_read_from_the_functions_dataset(env, monkeypatch):
     [sql] = FakeBigQuery.read_registry
     assert "`test-project.raw_test.tb_nordigen_requisition_registry`" in sql
     assert "integration_id" in sql and "requisition_id" in sql and "state" in sql
+
+
+def test_an_account_two_registered_requisitions_hold_is_read_once(env):
+    """Two households connecting one account, or a renewal before the old requisition is
+    deleted (D-24): each scope of its daily allowance is spent once."""
+    env.bank.requisitions = [held("req-a", A1), held("req-b", A1)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.register("req-a", "req-b")
+    assert "1 accounts" in env.run()
+    assert sorted(endpoint for _, endpoint in env.bank.calls) == [
+        "balances", "details", "metadata", "transactions"]
