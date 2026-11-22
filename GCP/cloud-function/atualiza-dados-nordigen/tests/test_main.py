@@ -4,7 +4,8 @@ from datetime import datetime, timedelta, timezone
 import pytest
 import requests
 
-from conftest import http_error, transaction
+import main
+from conftest import FakeBigQuery, http_error, transaction
 
 A1 = "4b4a4651-acc1"
 A2 = "4b4a4651-acc2"
@@ -360,7 +361,7 @@ def test_a_refresh_skips_an_account_no_linked_requisition_holds(env):
     [unknown] = env.log("refresh_account_unknown")
     assert json.loads(unknown["description"]) == {
         "account_id": A2, "request_id": "r-2",
-        "error": "no linked requisition of an active credential holds this account: not read"}
+        "error": "no registered linked requisition of an active credential holds this account: not read"}
     details = json.loads(env.log("ingestion_complete")[0]["description"])
     assert details["skipped"] == [A2] and env.log("ingestion_complete")[0]["type"] == "Info"
 
@@ -543,3 +544,75 @@ def test_requisitions_that_cannot_be_written_fail_the_run_and_the_accounts_still
     with pytest.raises(RuntimeError, match="tb_nordigen_requisitions"):
         env.run()
     assert len(env.rows("tb_nordigen_meta")) == 1
+
+
+# --- the requisition registry (finance-backend plans/bank-integrations.md D-21) ---
+
+def held(requisition_id, *accounts, status="LN"):
+    return {"id": requisition_id, "status": status, "accounts": list(accounts)}
+
+
+def test_an_unregistered_requisition_is_not_loaded_or_recorded(env):
+    """Created outside the app, or on the other environment: not this dataset's."""
+    env.bank.requisitions = [held("req-a1", A1), held("req-a2", A2)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.bank.account(A2, transactions=[transaction("2")])
+    env.register("req-a1")
+    env.run()
+    assert {account for account, _ in env.bank.calls} == {A1}
+    assert [r["requisition_id"] for r in env.rows("tb_nordigen_requisitions")] == ["req-a1"]
+
+
+def test_a_credential_with_nothing_registered_reads_nothing_and_does_not_fail(env):
+    env.bank.requisitions = [held("req-a1", A1)]
+    env.bank.account(A1)
+    FakeBigQuery.registry = []
+    env.run()
+    assert env.bank.calls == []
+    assert len(env.log("no_registered_requisition")) == 1
+    assert env.log("no_registered_requisition")[0]["type"] == "Info"
+    assert env.log("client_initialization_error") == []
+    assert env.rows("tb_nordigen_requisitions") == []
+
+
+def test_a_deleted_registry_row_is_not_loaded(env):
+    env.bank.requisitions = [held("req-a1", A1), held("req-a2", A2)]
+    env.bank.account(A1)
+    env.bank.account(A2)
+    env.register("req-a1", state="deleted")
+    env.register("req-a2")
+    env.run()
+    assert {account for account, _ in env.bank.calls} == {A2}
+    assert [r["requisition_id"] for r in env.rows("tb_nordigen_requisitions")] == ["req-a2"]
+
+
+def test_a_registered_requisition_that_is_not_linked_fails_as_before(env):
+    env.bank.requisitions = [held("req-a1", A1, status="EX"), held("req-a2", A2)]
+    env.register("req-a1")
+    with pytest.raises(RuntimeError, match="authorised again"):
+        env.run()
+    assert env.bank.calls == []
+
+
+def test_a_refresh_skips_an_account_of_an_unregistered_requisition(env):
+    env.bank.requisitions = [held("req-a1", A1), held("req-a2", A2)]
+    env.bank.account(A1)
+    env.bank.account(A2)
+    env.register("req-a1")
+    env.run({"account_ids": [A2], "request_id": "r-9"})
+    assert env.bank.calls == []
+    [unknown] = env.log("refresh_account_unknown")
+    assert json.loads(unknown["description"])["account_id"] == A2
+
+
+def test_the_registry_is_read_from_the_functions_dataset(env, monkeypatch):
+    monkeypatch.setattr(main, "DATASET", "raw_test")
+    env.bank.requisitions = [held("req-a1", A1)]
+    env.bank.account(A1)
+    try:
+        env.run()
+    except Exception:
+        pass
+    [sql] = FakeBigQuery.read_registry
+    assert "`test-project.raw_test.tb_nordigen_requisition_registry`" in sql
+    assert "integration_id" in sql and "requisition_id" in sql and "state" in sql

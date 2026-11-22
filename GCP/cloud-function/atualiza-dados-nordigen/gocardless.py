@@ -64,11 +64,15 @@ class Client:
             self._requisitions = call(self.api.requisition.get_requisitions)["results"]
         return self._requisitions
 
-    def linked_account_ids(self):
-        """Account ids of the requisitions whose bank authorisation is still valid (status LN).
-        An expired or removed requisition needs the bank to be authorised again, so this
-        fails instead of creating a new one."""
-        requisitions = self.requisitions()
+    def linked_account_ids(self, registered):
+        """Account ids of the registered requisitions whose bank authorisation is still valid
+        (status LN). registered is the requisition ids the registry holds as linked
+        (finance-backend plans/bank-integrations.md D-21); none registered reads nothing. An
+        expired or removed requisition needs the bank to be authorised again, so this fails
+        instead of creating a new one."""
+        if not registered:
+            return []
+        requisitions = [r for r in self.requisitions() if r["id"] in registered]
         linked = [r for r in requisitions if r["status"] == "LN"]
         if not linked:
             statuses = sorted({r["status"] for r in requisitions})
