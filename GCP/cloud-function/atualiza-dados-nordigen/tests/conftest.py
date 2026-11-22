@@ -16,6 +16,7 @@ import main  # noqa: E402
 
 LOG = "test-project.raw.tb_nordigen_ingestion_log"
 LIMITS = "test-project.raw.tb_nordigen_rate_limits"
+REQUISITIONS = "test-project.raw.tb_nordigen_requisitions"
 API = "https://bankaccountdata.gocardless.com/api/v2"
 
 
@@ -50,6 +51,10 @@ class FakeBank:
         self.calls = []
         self.left = {}
         self.headers = True
+        # Agreements and institutions (D-16): id -> the 200 body, or an exception to raise.
+        self.agreements = {}
+        self.institutions = {}
+        self.details_asked = []
 
     def account(self, account_id, transactions=(), balances=None, **extra):
         self.answers[(account_id, "metadata")] = [{
@@ -67,8 +72,22 @@ class FakeBank:
 
 
     def get(self, url, timeout=None, headers=None):
-        """requests.get as gocardless.Client calls it for one account endpoint."""
+        """requests.get as gocardless.Client calls it for one account endpoint, or for a
+        requisition's agreement or institution."""
         assert timeout and headers["Authorization"] == "Bearer token", headers
+        detail = re.fullmatch(rf"{API}/(agreements/enduser|institutions)/([^/]+)/", url)
+        if detail:
+            kind, key = detail.groups()
+            self.details_asked.append((kind.split("/")[0], key))
+            value = (self.agreements if kind.startswith("agreements") else self.institutions).get(
+                key, http_error(404))
+            if isinstance(value, requests.HTTPError):
+                return value.response
+            if isinstance(value, Exception):
+                raise value
+            response = requests.Response()
+            response.status_code, response._content = 200, json.dumps(value).encode()
+            return response
         # Metadata is accounts/{id}/ itself; the three counted scopes are below it.
         account_id, endpoint = re.fullmatch(
             rf"{API}/accounts/([^/]+)/(?:(details|balances|transactions)/)?", url).groups()
@@ -108,9 +127,18 @@ class FakeNordigenClient:
 
 
 class FakeSecrets:
+    """Secret Manager: an integration's client id secret holds its GoCardless secret_id, its
+    secret's the key (D-15). asked lists the names read."""
+    asked = []
+
     def access_secret_version(self, name):
-        secret_id = re.search(r"secrets/Nordigen_(.+)/versions", name).group(1)
-        payload = type("P", (), {"data": f"key-for-{secret_id}".encode()})()
+        secret = re.fullmatch(r"projects/test-project/secrets/(.+)/versions/latest", name).group(1)
+        FakeSecrets.asked.append(secret)
+        if secret.startswith("Nordigen_"):
+            value = f"key-for-{secret[len('Nordigen_'):]}"
+        else:
+            value = re.fullmatch(r"bank-integration-(.+)-client-id", secret).group(1) + "\n"
+        payload = type("P", (), {"data": value.encode()})()
         return type("S", (), {"payload": payload})()
 
 
@@ -126,14 +154,16 @@ class FakeBigQuery:
     """Tables are lists of dicts. MERGE is executed from its own SQL text: the ON keys,
     whether a WHEN MATCHED clause exists, and the INSERT column list."""
 
-    credentials = [{"client_id": "client-1", "secret_id": "s1"}]
+    credentials = [{"client_id": "client-1", "client_id_secret": "bank-integration-s1-client-id",
+                    "client_secret_secret": "Nordigen_s1"}]
 
     def __init__(self, project=None):
         self.tables = FakeBigQuery.tables
         self.merges = FakeBigQuery.merges
 
     def query(self, sql):
-        if "tb_sheet_nordigen_account" in sql:
+        if "app_bank_integrations" in sql:
+            FakeBigQuery.read_credentials.append(" ".join(sql.split()))
             return Done(rows=list(self.credentials))
         assert sql.strip().startswith("MERGE"), sql
         self.merges.append(sql)
@@ -159,6 +189,12 @@ class FakeBigQuery:
 
     def load_table_from_json(self, rows, ref, job_config=None):
         if ref == LOG:
+            self.tables.setdefault(ref, []).extend(rows)
+        elif ref == REQUISITIONS:
+            assert job_config.write_disposition == "WRITE_APPEND"
+            assert all(set(r) == {f.name for f in job_config.schema} for r in rows)
+            required = {f.name for f in job_config.schema if f.mode == "REQUIRED"}
+            assert all(r[name] is not None for r in rows for name in required)
             self.tables.setdefault(ref, []).extend(rows)
         elif ref == LIMITS:
             assert job_config.write_disposition == "WRITE_APPEND"
@@ -217,7 +253,8 @@ class FakeDataform:
 
 @pytest.fixture
 def env(monkeypatch):
-    FakeBigQuery.tables, FakeBigQuery.merges = {}, []
+    FakeBigQuery.tables, FakeBigQuery.merges, FakeBigQuery.read_credentials = {}, [], []
+    FakeSecrets.asked = []
     dataform = FakeDataform()
     monkeypatch.setattr(main, "dataform_session", lambda: dataform)
     bank = FakeBank()

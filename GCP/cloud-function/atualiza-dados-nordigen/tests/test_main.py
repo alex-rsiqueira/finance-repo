@@ -194,7 +194,7 @@ def test_no_credentials_is_a_failed_run(env, monkeypatch):
     import conftest
 
     monkeypatch.setattr(conftest.FakeBigQuery, "credentials", [])
-    with pytest.raises(RuntimeError, match="No active Nordigen credentials"):
+    with pytest.raises(RuntimeError, match="No GoCardless integration to read in raw.app_bank_integrations"):
         env.run()
     assert len(env.log("fatal_error")) == 1
 
@@ -438,3 +438,108 @@ def test_allowance_reads_only_the_account_success_headers():
         "http_x_ratelimit_account_success_reset": "21243"}) == {"limit": 4, "remaining": 2, "reset_seconds": 21243}
     assert gocardless.allowance({"http_x_ratelimit_account_success_remaining": ""}) == {}
     assert gocardless.allowance({}) == {}
+
+
+# --- credentials from app_bank_integrations (finance-backend plans/bank-integrations.md D-14 to D-16)
+
+def test_credentials_are_the_live_gocardless_integrations_naming_both_secrets(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    env.run()
+    [sql] = __import__("conftest").FakeBigQuery.read_credentials
+    assert ("SELECT integration_id AS client_id, client_id_secret, client_secret_secret FROM ( "
+            "SELECT * FROM `test-project.raw.app_bank_integrations` WHERE provider = 'gocardless' "
+            "QUALIFY ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY version_ts DESC) = 1 ) "
+            "WHERE is_active AND NOT is_deleted AND client_id_secret IS NOT NULL "
+            "AND client_secret_secret IS NOT NULL") in sql
+    assert "tb_sheet_nordigen_account" not in sql and "dim_client" not in sql
+
+
+def test_the_secrets_are_read_by_the_names_the_row_holds(env):
+    import conftest
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1)
+    env.run()
+    assert conftest.FakeSecrets.asked == ["bank-integration-s1-client-id", "Nordigen_s1"]
+
+
+def test_every_row_names_the_integration_as_its_client(env):
+    env.bank.requisitions = [linked(A1)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.run()
+    written = [r for t in ("meta", "details", "balances", "transactions", "rate_limits", "requisitions")
+               for r in env.rows(f"tb_nordigen_{t}")]
+    assert written and {r["client_id"] for r in written} == {"client-1"}
+
+
+def requisition(rid, status="LN", accounts=(A1,), institution="MILLENNIUMBCP_BCOMPTPL", agreement="agr-1"):
+    return {"id": rid, "status": status, "accounts": list(accounts), "institution_id": institution,
+            "agreement": agreement, "created": "2026-08-01T10:00:00.123456Z"}
+
+
+def test_a_full_run_writes_every_requisition_with_its_bank_and_authorisation_end(env):
+    env.bank.requisitions = [requisition("req-old", status="EX", agreement="agr-0"), requisition("req-new")]
+    env.bank.agreements = {
+        "agr-0": {"accepted": "2026-01-01T10:00:00Z", "access_valid_for_days": 90, "max_historical_days": 90},
+        "agr-1": {"accepted": "2026-08-01T10:05:00.5Z", "access_valid_for_days": 180,
+                  "max_historical_days": 730}}
+    env.bank.institutions = {"MILLENNIUMBCP_BCOMPTPL": {"name": "Millennium BCP"}}
+    env.bank.account(A1)
+    env.run()
+    rows = {r["requisition_id"]: r for r in env.rows("tb_nordigen_requisitions")}
+    assert set(rows) == {"req-old", "req-new"}, "expired ones too"
+    new = rows["req-new"]
+    assert (new["client_id"], new["status"], new["institution_name"], new["account_ids"]) == (
+        "client-1", "LN", "Millennium BCP", [A1])
+    assert (new["accepted"], new["access_valid_for_days"], new["max_historical_days"]) == (
+        "2026-08-01T10:05:00.5Z", 180, 730)
+    assert new["access_ends"] == "2027-01-28T10:05:00.500000+00:00"
+    assert rows["req-old"]["access_ends"] == "2026-04-01T10:00:00+00:00"
+    assert {r["dtinsert"] for r in rows.values()} == {"2026-10-07 07:00:00"}
+    assert env.bank.details_asked.count(("institutions", "MILLENNIUMBCP_BCOMPTPL")) == 1, \
+        "a bank is asked once per run"
+    assert all(account in (A1,) for account, _ in env.bank.calls), "no account call for an expired one"
+
+
+def test_a_refresh_writes_no_requisition(env):
+    env.bank.requisitions = [requisition("req-new")]
+    env.bank.account(A1)
+    env.run({"account_ids": [A1], "request_id": "r-1"})
+    assert env.rows("tb_nordigen_requisitions") == []
+    assert env.bank.details_asked == []
+
+
+def test_a_detail_that_cannot_be_read_is_left_empty_logged_and_not_a_failure(env):
+    env.bank.requisitions = [requisition("req-new")]
+    env.bank.agreements = {"agr-1": requests.ConnectionError("reset")}
+    env.bank.account(A1)
+    assert "1 accounts" in env.run()
+    [row] = env.rows("tb_nordigen_requisitions")
+    assert (row["accepted"], row["access_ends"], row["institution_name"]) == (None, None, None)
+    details = [json.loads(r["description"])["detail"] for r in env.log("requisition_detail_error")]
+    assert sorted(details) == ["agreement", "institution"]
+    assert env.log("ingestion_complete")[0]["type"] == "Info"
+
+
+def test_a_credential_with_no_linked_bank_still_writes_its_banks(env):
+    """Its expired authorisation is what Settings › Integrations has to show."""
+    env.bank.requisitions = [requisition("req-old", status="EX")]
+    with pytest.raises(RuntimeError, match="authorised again"):
+        env.run()
+    assert [r["status"] for r in env.rows("tb_nordigen_requisitions")] == ["EX"]
+
+
+def test_requisitions_that_cannot_be_written_fail_the_run_and_the_accounts_still_load(env, monkeypatch):
+    import conftest
+    env.bank.requisitions = [requisition("req-new")]
+    env.bank.account(A1)
+    load = conftest.FakeBigQuery.load_table_from_json
+
+    def refuse(self, rows, ref, job_config=None):
+        if ref.endswith("tb_nordigen_requisitions"):
+            raise RuntimeError("refused")
+        return load(self, rows, ref, job_config)
+    monkeypatch.setattr(conftest.FakeBigQuery, "load_table_from_json", refuse)
+    with pytest.raises(RuntimeError, match="tb_nordigen_requisitions"):
+        env.run()
+    assert len(env.rows("tb_nordigen_meta")) == 1

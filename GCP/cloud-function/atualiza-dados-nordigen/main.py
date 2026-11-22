@@ -7,14 +7,25 @@ Runs from Pub/Sub, on two kinds of message (finance-backend plans/bank-refresh.m
                                               linked requisition holds is skipped and logged.
   anything else                               the 08:00 scheduler's message: every account.
 
-For every active credential in trusted.tb_sheet_nordigen_account it lists the accounts of the
-linked requisitions and, per account, calls metadata, details, balances and transactions once
-each (on a full run). Every record goes into a temp table and is merged into its raw table on
-that table's key:
+Its credentials are the household integrations of raw.app_bank_integrations with provider
+gocardless (finance-backend plans/bank-integrations.md D-14, D-15): the newest version of each,
+live, active and naming both secrets - GoCardless's secret_id and secret key, read from Secret
+Manager by those names. The demo's integration names none and is never read. Every row a
+credential loads carries its integration id as client_id.
+
+For every credential it lists the accounts of the linked requisitions and, per account, calls
+metadata, details, balances and transactions once each (on a full run). Every record goes into
+a temp table and is merged into its raw table on that table's key:
 
   tb_nordigen_meta, tb_nordigen_details   one row per account, updated in place
   tb_nordigen_balances                    insert only, one version per run (dtinsert)
   tb_nordigen_transactions                insert only, payload keeps the whole record
+
+A full run also writes every requisition of each credential, expired ones included, to
+tb_nordigen_requisitions (insert only, D-16): its bank's name and when its agreement ends, from
+one call for the agreement and one for the institution (once per run each), neither counted
+against an account's allowance. Either call failing leaves its columns empty and is logged as
+requisition_detail_error, not as a failure of the run. A refresh writes none.
 
 Every details, balances and transactions answer reports the account's allowance for that scope
 (gocardless.allowance); one row per call goes into tb_nordigen_rate_limits, insert only (D-1).
@@ -48,6 +59,8 @@ PROJECT_ID = os.environ.get("PROJECT_ID", "")
 DATASET = os.environ.get("DATASET", "raw")
 LOG_TABLE = "tb_nordigen_ingestion_log"
 LIMITS_TABLE = "tb_nordigen_rate_limits"
+REQUISITIONS_TABLE = "tb_nordigen_requisitions"
+INTEGRATIONS = "app_bank_integrations"
 # As the table's DDL (finance-backend bigquery/ddl/nordigen/), modes included: a load whose schema
 # says NULLABLE for a REQUIRED column is refused.
 LIMITS_SCHEMA = [
@@ -57,6 +70,19 @@ LIMITS_SCHEMA = [
         ("limit_count", "INT64", False), ("remaining", "INT64", False), ("reset_at", "TIMESTAMP", False),
         ("status", "STRING", True), ("observed_at", "TIMESTAMP", True), ("request_id", "STRING", False),
         ("dtinsert", "STRING", True),
+    ]
+]
+# As tb_nordigen_requisitions's DDL (finance-backend bigquery/ddl/nordigen/).
+REQUISITIONS_SCHEMA = [
+    bigquery.SchemaField(name, kind, mode=mode)
+    for name, kind, mode in [
+        ("requisition_id", "STRING", "REQUIRED"), ("client_id", "STRING", "REQUIRED"),
+        ("status", "STRING", "REQUIRED"), ("institution_id", "STRING", "NULLABLE"),
+        ("institution_name", "STRING", "NULLABLE"), ("created", "TIMESTAMP", "NULLABLE"),
+        ("agreement_id", "STRING", "NULLABLE"), ("accepted", "TIMESTAMP", "NULLABLE"),
+        ("access_valid_for_days", "INT64", "NULLABLE"), ("access_ends", "TIMESTAMP", "NULLABLE"),
+        ("max_historical_days", "INT64", "NULLABLE"), ("account_ids", "STRING", "REPEATED"),
+        ("observed_at", "TIMESTAMP", "REQUIRED"), ("dtinsert", "STRING", "REQUIRED"),
     ]
 ]
 # The endpoints GoCardless counts per account (metadata is not one), and what a refresh calls (D-2).
@@ -104,6 +130,8 @@ def main(event, context):
     failures = []
     rows_written = {table: 0 for table in TABLES}
     allowances = []
+    requisitions = []
+    institutions = {}
     accounts = 0
 
     # The app's refresh names accounts; anything else (the scheduler's message) means every account.
@@ -121,22 +149,43 @@ def main(event, context):
 
     try:
         credentials = [dict(row) for row in bq.query(f"""
-            SELECT b.id AS client_id, a.secret_ID AS secret_id
-            FROM `{PROJECT_ID}.trusted.tb_sheet_nordigen_account` a
-            INNER JOIN `{PROJECT_ID}.refined.dim_client` b ON a.person_ID = b.cpf
-            WHERE a.active_FLG = 1
+            SELECT integration_id AS client_id, client_id_secret, client_secret_secret
+            FROM (
+              SELECT *
+              FROM `{PROJECT_ID}.{DATASET}.{INTEGRATIONS}`
+              WHERE provider = 'gocardless'
+              QUALIFY ROW_NUMBER() OVER (PARTITION BY row_id ORDER BY version_ts DESC) = 1
+            )
+            WHERE is_active AND NOT is_deleted
+              AND client_id_secret IS NOT NULL AND client_secret_secret IS NOT NULL
+            ORDER BY integration_id
         """).result()]
         if not credentials:
-            raise RuntimeError("No active Nordigen credentials in trusted.tb_sheet_nordigen_account")
+            raise RuntimeError(f"No GoCardless integration to read in {DATASET}.{INTEGRATIONS}")
 
         linked = set()
         for credential in credentials:
             client_id = credential["client_id"]
             try:
-                secret_key = secretmanager.SecretManagerServiceClient().access_secret_version(
-                    name=f"projects/{PROJECT_ID}/secrets/Nordigen_{credential['secret_id']}/versions/latest"
-                ).payload.data.decode("UTF-8")
-                client = gocardless.Client(credential["secret_id"], secret_key)
+                secrets = secretmanager.SecretManagerServiceClient()
+                secret_id, secret_key = (
+                    secrets.access_secret_version(
+                        name=f"projects/{PROJECT_ID}/secrets/{credential[name]}/versions/latest"
+                    ).payload.data.decode("UTF-8").strip()
+                    for name in ("client_id_secret", "client_secret_secret"))
+                client = gocardless.Client(secret_id, secret_key)
+                held = client.requisitions()
+            except Exception as e:
+                failures.append(f"client {client_id}: {e}")
+                log_event(bq, "client_initialization_error", "error",
+                          {"client_id": client_id, "request_id": request_id,
+                           "error": str(e), "error_type": type(e).__name__})
+                continue
+            # Every bank of the credential, linked or not, for Settings › Integrations (D-16).
+            if not refresh:
+                requisitions.extend(requisition_row(bq, client, r, client_id, institutions, run)
+                                    for r in held)
+            try:
                 account_ids = client.linked_account_ids()
             except Exception as e:
                 failures.append(f"client {client_id}: {e}")
@@ -177,6 +226,19 @@ def main(event, context):
                 "account_id": account_id, "request_id": request_id,
                 "error": "no linked requisition of an active credential holds this account: not read"})
 
+        if requisitions:
+            try:
+                bq.load_table_from_json(
+                    requisitions, f"{PROJECT_ID}.{DATASET}.{REQUISITIONS_TABLE}",
+                    job_config=bigquery.LoadJobConfig(
+                        schema=REQUISITIONS_SCHEMA, write_disposition=bigquery.WriteDisposition.WRITE_APPEND),
+                ).result()
+            except Exception as e:
+                failures.append(f"{REQUISITIONS_TABLE}: {e}")
+                log_event(bq, "table_processing_error", "error", {
+                    "table_id": REQUISITIONS_TABLE, "request_id": request_id,
+                    "error": str(e), "error_type": type(e).__name__})
+
         if allowances:
             try:
                 bq.load_table_from_json(
@@ -203,6 +265,39 @@ def main(event, context):
     if failures:
         raise RuntimeError("Nordigen ingestion finished with errors: " + "; ".join(failures))
     return f"Nordigen ingestion complete: {accounts} accounts, rows written {rows_written}"
+
+
+def requisition_row(bq, client, requisition, client_id, institutions, run):
+    """A tb_nordigen_requisitions row: the requisition, its agreement's acceptance and end, and
+    its bank's name. institutions holds the banks already asked this run. A detail that cannot
+    be read is left empty and logged; it never stops the load."""
+    agreement, institution_id = {}, requisition.get("institution_id")
+    failed = {"client_id": client_id, "requisition_id": requisition.get("id")}
+    if requisition.get("agreement"):
+        try:
+            agreement = client.agreement(requisition["agreement"])
+        except Exception as e:
+            log_event(bq, "requisition_detail_error", "error", {
+                **failed, "detail": "agreement", "error": str(e), "error_type": type(e).__name__})
+    if institution_id and institution_id not in institutions:
+        try:
+            institutions[institution_id] = client.institution(institution_id).get("name")
+        except Exception as e:
+            log_event(bq, "requisition_detail_error", "error", {
+                **failed, "detail": "institution", "error": str(e), "error_type": type(e).__name__})
+    accepted, days = agreement.get("accepted"), agreement.get("access_valid_for_days")
+    ends = None
+    if accepted and days is not None:
+        ends = (datetime.fromisoformat(accepted.replace("Z", "+00:00")) + timedelta(days=int(days))).isoformat()
+    return {
+        "requisition_id": requisition["id"], "client_id": client_id, "status": requisition["status"],
+        "institution_id": institution_id, "institution_name": institutions.get(institution_id),
+        "created": requisition.get("created"), "agreement_id": requisition.get("agreement"),
+        "accepted": accepted, "access_valid_for_days": days, "access_ends": ends,
+        "max_historical_days": agreement.get("max_historical_days"),
+        "account_ids": list(requisition.get("accounts") or []),
+        "observed_at": datetime.now(timezone.utc).isoformat(), "dtinsert": run["dtinsert"],
+    }
 
 
 def allowance_row(account_id, client_id, scope, limits, status, run):
