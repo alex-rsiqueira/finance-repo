@@ -627,3 +627,55 @@ def test_an_account_two_registered_requisitions_hold_is_read_once(env):
     assert "1 accounts" in env.run()
     assert sorted(endpoint for _, endpoint in env.bank.calls) == [
         "balances", "details", "metadata", "transactions"]
+
+
+# --- A bank connected from the app loads at once (finance-backend plans/bank-integrations.md D-23)
+
+
+def test_a_connected_bank_loads_only_its_requisitions_accounts_in_full(env):
+    env.bank.requisitions = [held("req-a1", A1), held("req-a2", A2)]
+    env.bank.account(A1, transactions=[transaction("1")])
+    env.bank.account(A2, transactions=[transaction("2")])
+    env.register("req-a1", "req-a2")
+    assert "1 accounts" in env.run({"requisition_ids": ["req-a2"], "request_id": "c-1"})
+    assert sorted(env.bank.calls) == [(A2, "balances"), (A2, "details"), (A2, "metadata"),
+                                      (A2, "transactions")]
+    assert {r["account_id"] for r in env.rows("tb_nordigen_meta")} == {A2}
+    assert {r["request_id"] for r in env.rows("tb_nordigen_rate_limits")} == {"c-1"}
+
+
+def test_a_connected_bank_writes_only_its_requisition_row(env):
+    env.bank.requisitions = [held("req-a1", A1), held("req-a2", A2)]
+    env.bank.account(A1)
+    env.bank.account(A2)
+    env.register("req-a1", "req-a2")
+    env.run({"requisition_ids": ["req-a2"], "request_id": "c-1"})
+    assert [r["requisition_id"] for r in env.rows("tb_nordigen_requisitions")] == ["req-a2"]
+
+
+def test_a_connected_bank_starts_a_bank_run_named_by_its_request(env):
+    env.bank.requisitions = [held("req-a1", A1)]
+    env.bank.account(A1)
+    env.register("req-a1")
+    env.run({"requisition_ids": ["req-a1"], "request_id": "c-1"})
+    [complete] = env.log("ingestion_complete")
+    details = json.loads(complete["description"])
+    assert (details["request_id"], details["requisitions"]) == ("c-1", ["req-a1"])
+    assert json.loads(env.log("dataform_run_started")[0]["description"])["request_id"] == "c-1"
+
+
+@pytest.mark.parametrize("state", [None, "pending", "deleted"])
+def test_a_requisition_not_registered_as_linked_is_skipped_and_logged(env, state):
+    env.bank.requisitions = [held("req-a1", A1), held("req-a2", A2)]
+    env.bank.account(A1)
+    env.bank.account(A2)
+    env.register("req-a1")
+    if state:
+        env.register("req-a2", state=state)
+    env.run({"requisition_ids": ["req-a2"], "request_id": "c-1"})
+    assert env.bank.calls == [] and env.rows("tb_nordigen_requisitions") == []
+    [skipped] = env.log("requisition_not_registered")
+    assert json.loads(skipped["description"]) == {
+        "requisition_id": "req-a2", "request_id": "c-1",
+        "error": "not registered as linked in this dataset: not read"}
+    assert env.log("no_registered_requisition") == []
