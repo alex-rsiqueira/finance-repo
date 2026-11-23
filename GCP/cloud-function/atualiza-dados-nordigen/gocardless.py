@@ -18,6 +18,7 @@ from nordigen import NordigenClient
 ATTEMPTS = 3
 MAX_WAIT_SECONDS = 60
 TIMEOUT_SECONDS = 10  # as the nordigen library's own calls
+PAGE = 100  # requisitions asked for per page, the library's default
 
 # The account success headers, by the names GoCardless sends them (read on a live call 2026-10-31).
 ALLOWANCE_HEADERS = {
@@ -59,9 +60,17 @@ class Client:
 
     def requisitions(self):
         """Every requisition of these credentials, as GoCardless lists them: one per bank
-        authorisation, expired ones included. Asked once per client."""
+        authorisation, expired ones included, every page of them (one GoCardless account serves
+        every household, finance-backend plans/bank-integrations.md D-20, so they pass a page).
+        Asked once per client."""
         if self._requisitions is None:
-            self._requisitions = call(self.api.requisition.get_requisitions)["results"]
+            found = []
+            while True:
+                page = call(self.api.requisition.get_requisitions, limit=PAGE, offset=len(found))
+                found.extend(page.get("results") or [])
+                if not page.get("next") or not page.get("results"):
+                    break
+            self._requisitions = found
         return self._requisitions
 
     def linked_account_ids(self, registered):

@@ -679,3 +679,15 @@ def test_a_requisition_not_registered_as_linked_is_skipped_and_logged(env, state
         "requisition_id": "req-a2", "request_id": "c-1",
         "error": "not registered as linked in this dataset: not read"}
     assert env.log("no_registered_requisition") == []
+
+
+def test_every_page_of_the_accounts_requisitions_is_read(env):
+    """One GoCardless account serves every household (D-20), so its requisitions pass a page:
+    a registered one on a later page still loads."""
+    env.bank.page = 2
+    env.bank.requisitions = [held("req-x1", "acc-x1", status="EX"), held("req-x2", "acc-x2", status="EX"),
+                             held("req-a1", A1)]
+    env.bank.account(A1)
+    env.register("req-a1")
+    assert "1 accounts" in env.run()
+    assert env.bank.pages_read == [0, 2]
