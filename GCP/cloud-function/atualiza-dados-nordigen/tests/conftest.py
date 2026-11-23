@@ -161,7 +161,20 @@ class FakeBigQuery:
         self.tables = FakeBigQuery.tables
         self.merges = FakeBigQuery.merges
 
+    # The requisition registry (finance-backend plans/bank-integrations.md D-21): rows of
+    # {"integration_id", "requisition_id", "state"}. None means every requisition the fake bank
+    # holds, registered as client-1's and linked, so a test that is not about the registry
+    # reads what it always did.
+    registry = None
+
     def query(self, sql):
+        if "tb_nordigen_requisition_registry" in sql:
+            FakeBigQuery.read_registry.append(" ".join(sql.split()))
+            rows = self.registry if self.registry is not None else [
+                {"integration_id": "client-1", "requisition_id": r["id"], "state": "linked"}
+                for r in FakeNordigenClient.bank.requisitions]
+            keep_deleted = "state != 'deleted'" not in " ".join(sql.split())
+            return Done(rows=[dict(r) for r in rows if keep_deleted or r["state"] != "deleted"])
         if "app_bank_integrations" in sql:
             FakeBigQuery.read_credentials.append(" ".join(sql.split()))
             return Done(rows=list(self.credentials))
@@ -254,6 +267,7 @@ class FakeDataform:
 @pytest.fixture
 def env(monkeypatch):
     FakeBigQuery.tables, FakeBigQuery.merges, FakeBigQuery.read_credentials = {}, [], []
+    FakeBigQuery.registry, FakeBigQuery.read_registry = None, []
     FakeSecrets.asked = []
     dataform = FakeDataform()
     monkeypatch.setattr(main, "dataform_session", lambda: dataform)
@@ -271,6 +285,11 @@ def env(monkeypatch):
         def __init__(self):
             self.bank, self.sleeps, self.tables, self.merges = bank, sleeps, FakeBigQuery.tables, FakeBigQuery.merges
             self.dataform = dataform
+
+        def register(self, *requisition_ids, state="linked", client="client-1"):
+            """Only these requisitions are in the registry (D-21)."""
+            FakeBigQuery.registry = (FakeBigQuery.registry or []) + [
+                {"integration_id": client, "requisition_id": r, "state": state} for r in requisition_ids]
 
         def run_at(self, when, message=None):
             """message is the Pub/Sub message's JSON (None for the scheduler's empty one)."""

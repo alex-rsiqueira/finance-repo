@@ -13,7 +13,14 @@ live, active and naming both secrets - GoCardless's secret_id and secret key, re
 Manager by those names. The demo's integration names none and is never read. Every row a
 credential loads carries its integration id as client_id.
 
-For every credential it lists the accounts of the linked requisitions and, per account, calls
+Which requisitions it reads is the requisition registry's (tb_nordigen_requisition_registry in
+its own dataset, finance-backend plans/bank-integrations.md D-21): of each credential, the
+registered requisitions that are not deleted. A requisition GoCardless holds that the registry
+does not - created outside the app, or registered on the other environment - is neither loaded
+nor recorded. A credential with nothing registered reads nothing and logs
+no_registered_requisition, which is not a failure.
+
+For every credential it lists the accounts of its registered linked requisitions and, per account, calls
 metadata, details, balances and transactions once each (on a full run). Every record goes into
 a temp table and is merged into its raw table on that table's key:
 
@@ -21,7 +28,7 @@ a temp table and is merged into its raw table on that table's key:
   tb_nordigen_balances                    insert only, one version per run (dtinsert)
   tb_nordigen_transactions                insert only, payload keeps the whole record
 
-A full run also writes every requisition of each credential, expired ones included, to
+A full run also writes every registered requisition of each credential, expired ones included, to
 tb_nordigen_requisitions (insert only, D-16): its bank's name and when its agreement ends, from
 one call for the agreement and one for the institution (once per run each), neither counted
 against an account's allowance. Either call failing leaves its columns empty and is logged as
@@ -61,6 +68,7 @@ LOG_TABLE = "tb_nordigen_ingestion_log"
 LIMITS_TABLE = "tb_nordigen_rate_limits"
 REQUISITIONS_TABLE = "tb_nordigen_requisitions"
 INTEGRATIONS = "app_bank_integrations"
+REGISTRY = "tb_nordigen_requisition_registry"
 # As the table's DDL (finance-backend bigquery/ddl/nordigen/), modes included: a load whose schema
 # says NULLABLE for a REQUIRED column is refused.
 LIMITS_SCHEMA = [
@@ -163,6 +171,15 @@ def main(event, context):
         if not credentials:
             raise RuntimeError(f"No GoCardless integration to read in {DATASET}.{INTEGRATIONS}")
 
+        # This dataset's registered requisitions per credential (D-21), deleted ones left out.
+        registered = {}
+        for row in bq.query(f"""
+            SELECT integration_id, requisition_id, state
+            FROM `{PROJECT_ID}.{DATASET}.{REGISTRY}`
+            WHERE state != 'deleted'
+        """).result():
+            registered.setdefault(row["integration_id"], {})[row["requisition_id"]] = row["state"]
+
         linked = set()
         for credential in credentials:
             client_id = credential["client_id"]
@@ -181,12 +198,19 @@ def main(event, context):
                           {"client_id": client_id, "request_id": request_id,
                            "error": str(e), "error_type": type(e).__name__})
                 continue
-            # Every bank of the credential, linked or not, for Settings › Integrations (D-16).
+            mine = registered.get(client_id, {})
+            if not mine:
+                log_event(bq, "no_registered_requisition", "info",
+                          {"client_id": client_id, "request_id": request_id,
+                           "error": "no requisition of this credential is registered in this dataset: nothing read"})
+                continue
+            # Every registered bank of the credential, linked or not, for Settings › Integrations (D-16).
             if not refresh:
                 requisitions.extend(requisition_row(bq, client, r, client_id, institutions, run)
-                                    for r in held)
+                                    for r in held if r["id"] in mine)
             try:
-                account_ids = client.linked_account_ids()
+                account_ids = client.linked_account_ids(
+                    {r for r, state in mine.items() if state == "linked"})
             except Exception as e:
                 failures.append(f"client {client_id}: {e}")
                 log_event(bq, "client_initialization_error", "error",
@@ -224,7 +248,7 @@ def main(event, context):
         for account_id in skipped:
             log_event(bq, "refresh_account_unknown", "error", {
                 "account_id": account_id, "request_id": request_id,
-                "error": "no linked requisition of an active credential holds this account: not read"})
+                "error": "no registered linked requisition of an active credential holds this account: not read"})
 
         if requisitions:
             try:
