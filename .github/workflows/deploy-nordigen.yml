@@ -4,7 +4,8 @@ name: Deploy Nordigen ingestion
 # CI. Same keyless sign-in and deploy account as finance-backend and
 # finance-frontend (DEPLOY_SA_PROD, `production` environment). The function is
 # not invoked here: GoCardless allows few calls per account and day, so the
-# first run after a deploy is the scheduled 08:00 one.
+# first run after a deploy is the scheduled 08:00 one. The same build is deployed again as
+# atualiza-dados-nordigen-dev, writing raw_dev, with no schedule.
 
 on:
   push:
@@ -72,3 +73,41 @@ jobs:
           test "$READY" = "$LATEST"
           test "$MEMORY" = "512Mi"
           test "$THROTTLING" = "false"
+
+      - name: Deploy atualiza-dados-nordigen-dev
+        # Dev's own load (finance-backend plans/bank-integrations.md D-23): the same build and
+        # settings, writing raw_dev, so a bank connected from the app on dev loads as on prod. It
+        # reads raw_dev's registry and integrations; it is published to only by
+        # finance-api-dev-run, with the requisitions of a bank just connected, never on a
+        # schedule. Its trigger is its own topic, atualiza-dados-nordigen-dev; the topic, the
+        # trigger's subscription (ack deadline 600 s, as prod's) and the publish grant are set by
+        # hand. After a load that wrote rows the function starts a Dataform run of the bank tag
+        # from DATAFORM_RELEASE's compilation: dev names release-dev, so its loads never start a
+        # prod run.
+        run: |
+          gcloud run deploy atualiza-dados-nordigen-dev \
+            --source GCP/cloud-function/atualiza-dados-nordigen \
+            --function main \
+            --base-image python311 \
+            --project finances-314506 \
+            --region us-central1 \
+            --service-account 16973409618-compute@developer.gserviceaccount.com \
+            --memory 512Mi --cpu 1 --no-cpu-throttling --max-instances 1 --concurrency 1 --timeout 300 \
+            --no-allow-unauthenticated \
+            --labels env=dev \
+            --update-env-vars PROJECT_ID=finances-314506,FUNCTION_SIGNATURE_TYPE=event,DATASET=raw_dev,DATAFORM_RELEASE=release-dev
+
+      - name: Check the dev revision is serving, writes raw_dev and runs release-dev
+        run: |
+          SERVICE="$(gcloud run services describe atualiza-dados-nordigen-dev \
+            --project finances-314506 --region us-central1 --format json)"
+          READY="$(jq -r '.status.latestReadyRevisionName' <<< "$SERVICE")"
+          LATEST="$(jq -r '.status.latestCreatedRevisionName' <<< "$SERVICE")"
+          DATASET="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "DATASET") | .value' <<< "$SERVICE")"
+          SIGNATURE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "FUNCTION_SIGNATURE_TYPE") | .value' <<< "$SERVICE")"
+          RELEASE="$(jq -r '.spec.template.spec.containers[0].env[] | select(.name == "DATAFORM_RELEASE") | .value' <<< "$SERVICE")"
+          echo "ready=$READY latest=$LATEST dataset=$DATASET signature=$SIGNATURE release=$RELEASE"
+          test "$READY" = "$LATEST"
+          test "$DATASET" = "raw_dev"
+          test "$SIGNATURE" = "event"
+          test "$RELEASE" = "release-dev"

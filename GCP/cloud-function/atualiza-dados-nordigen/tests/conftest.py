@@ -55,6 +55,9 @@ class FakeBank:
         self.agreements = {}
         self.institutions = {}
         self.details_asked = []
+        # GoCardless lists requisitions a page at a time (limit, offset, next).
+        self.page = 100
+        self.pages_read = []
 
     def account(self, account_id, transactions=(), balances=None, **extra):
         self.answers[(account_id, "metadata")] = [{
@@ -119,7 +122,15 @@ class FakeNordigenClient:
         assert secret_key == f"key-for-{secret_id}"
         bank = self.bank
         self.token = None
-        self.requisition = type("R", (), {"get_requisitions": lambda _self: {"results": bank.requisitions}})()
+        def get_requisitions(_self, limit=100, offset=0):
+            """GoCardless's pages: `limit` from `offset`, with `next` while more remain. The bank's
+            `page` caps a page, as GoCardless's own maximum would."""
+            size = min(limit, bank.page)
+            bank.pages_read.append(offset)
+            more = offset + size < len(bank.requisitions)
+            return {"count": len(bank.requisitions), "results": bank.requisitions[offset:offset + size],
+                    "next": f"{API}/requisitions/?limit={size}&offset={offset + size}" if more else None}
+        self.requisition = type("R", (), {"get_requisitions": get_requisitions})()
 
     def generate_token(self):
         self.token = "token"

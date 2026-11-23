@@ -1,11 +1,18 @@
 """Loads the Nordigen / GoCardless bank accounts into the raw tb_nordigen_* tables.
 
-Runs from Pub/Sub, on two kinds of message (finance-backend plans/bank-refresh.md §3.2):
+Runs from Pub/Sub, on three kinds of message (finance-backend plans/bank-refresh.md §3.2,
+plans/bank-integrations.md D-23):
 
-  {"account_ids": [...], "request_id": ...}   the app's refresh: only those accounts, and only
-                                              balances and transactions (D-2). An account no
-                                              linked requisition holds is skipped and logged.
-  anything else                               the 08:00 scheduler's message: every account.
+  {"account_ids": [...], "request_id": ...}       the app's refresh: only those accounts, and
+                                                  only balances and transactions (D-2). An
+                                                  account no linked requisition holds is
+                                                  skipped and logged.
+  {"requisition_ids": [...], "request_id": ...}   a bank just connected from the app: a full
+                                                  run of those requisitions' accounts only, and
+                                                  their tb_nordigen_requisitions rows only. One
+                                                  the registry does not hold as linked is
+                                                  skipped and logged requisition_not_registered.
+  anything else                                   the 08:00 scheduler's message: every account.
 
 Its credentials are the household integrations of raw.app_bank_integrations with provider
 gocardless (finance-backend plans/bank-integrations.md D-14, D-15): the newest version of each,
@@ -151,9 +158,15 @@ def main(event, context):
     refresh = "account_ids" in body
     requested = body.get("account_ids") if isinstance(body.get("account_ids"), list) else []
     requested = list(dict.fromkeys(str(a) for a in requested))
-    request_id = body.get("request_id") if refresh else None
+    # A bank just connected from the app names its requisitions (D-23); a refresh wins if both.
+    connect = "requisition_ids" in body and not refresh
+    connected = body.get("requisition_ids") if isinstance(body.get("requisition_ids"), list) else []
+    connected = list(dict.fromkeys(str(r) for r in connected))
+    request_id = body.get("request_id") if refresh or connect else None
     tables = REFRESH_TABLES if refresh else list(TABLES)
     run = {"dtinsert": dtinsert, "request_id": request_id, "requested": requested if refresh else None}
+    if connect:
+        run["requisitions"] = connected
 
     try:
         credentials = [dict(row) for row in bq.query(f"""
@@ -204,6 +217,10 @@ def main(event, context):
                           {"client_id": client_id, "request_id": request_id,
                            "error": "no requisition of this credential is registered in this dataset: nothing read"})
                 continue
+            if connect:
+                mine = {r: state for r, state in mine.items() if r in connected and state == "linked"}
+                if not mine:
+                    continue
             # Every registered bank of the credential, linked or not, for Settings › Integrations (D-16).
             if not refresh:
                 requisitions.extend(requisition_row(bq, client, r, client_id, institutions, run)
@@ -243,6 +260,12 @@ def main(event, context):
                             continue
                         failures.append(f"{table} for account {account_id}: {e}")
                         log_event(bq, "table_processing_error", "error", details)
+
+        held_linked = {r for c in registered.values() for r, state in c.items() if state == "linked"}
+        for requisition_id in [r for r in connected if connect and r not in held_linked]:
+            log_event(bq, "requisition_not_registered", "error", {
+                "requisition_id": requisition_id, "request_id": request_id,
+                "error": "not registered as linked in this dataset: not read"})
 
         skipped = [a for a in requested if a not in linked]
         for account_id in skipped:
